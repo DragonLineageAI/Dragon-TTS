@@ -72,6 +72,20 @@ trainer:
   limit_train_batches: null
   limit_val_batches: null
   check_val_every_n_epoch: 1
+  # Chạy validation mỗi N step (int) thay vì chờ hết epoch. null = theo epoch.
+  # Best-checkpoint (theo val/mse) được lưu tại mỗi lần validation.
+  val_check_interval: null
+
+# Checkpoint saving (ModelCheckpoint).
+checkpoint:
+  monitor: val/mse        # metric chọn top_k; null = không theo dõi metric
+  mode: min
+  save_top_k: 3
+  save_last: true
+  # Lưu snapshot định kỳ theo step (ngoài best-by-metric). null/0 = tắt.
+  every_n_train_steps: null
+  # Số snapshot theo step giữ lại (-1 = giữ tất cả).
+  step_save_top_k: -1
 
 output_dir: outputs
 run_name: speaker_tokenizer

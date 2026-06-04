@@ -61,18 +61,35 @@ def main(cfg: DictConfig) -> None:
     out_dir = Path(cfg.output_dir) / cfg.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    ckpt_cfg = cfg.get("checkpoint", {})
     callbacks = [
+        # Best-by-metric: lưu tại mỗi lần validation (epoch hoặc val_check_interval).
         ModelCheckpoint(
             dirpath=str(out_dir / "ckpts"),
-            filename="best-{epoch:03d}-{val/mse:.4f}",
-            monitor="val/mse",
-            mode="min",
-            save_top_k=3,
-            save_last=True,
+            filename="best-{epoch:03d}-{step:06d}-{val/mse:.4f}",
+            monitor=ckpt_cfg.get("monitor", "val/mse"),
+            mode=ckpt_cfg.get("mode", "min"),
+            save_top_k=ckpt_cfg.get("save_top_k", 3),
+            save_last=ckpt_cfg.get("save_last", True),
             auto_insert_metric_name=False,
         ),
         LearningRateMonitor(logging_interval="step"),
     ]
+
+    # Snapshot định kỳ theo step (không phụ thuộc metric).
+    every_n_steps = ckpt_cfg.get("every_n_train_steps", None)
+    if every_n_steps:
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=str(out_dir / "ckpts"),
+                filename="step-{step:06d}",
+                every_n_train_steps=int(every_n_steps),
+                save_top_k=ckpt_cfg.get("step_save_top_k", -1),
+                monitor=None,
+                save_last=False,
+                auto_insert_metric_name=False,
+            )
+        )
 
     logger = TensorBoardLogger(save_dir=str(out_dir), name="tb")
 
@@ -94,6 +111,8 @@ def main(cfg: DictConfig) -> None:
         trainer_kwargs["limit_train_batches"] = cfg.trainer.limit_train_batches
     if cfg.trainer.limit_val_batches is not None:
         trainer_kwargs["limit_val_batches"] = cfg.trainer.limit_val_batches
+    if cfg.trainer.get("val_check_interval", None) is not None:
+        trainer_kwargs["val_check_interval"] = cfg.trainer.val_check_interval
 
     trainer = pl.Trainer(**trainer_kwargs)
     trainer.fit(lit, datamodule=dm)
