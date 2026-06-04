@@ -70,9 +70,14 @@ def main():
     dst = Path(args.dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    raw = torch.load(src, map_location="cpu")
-    if isinstance(raw, dict) and "state_dict" in raw:
-        raw = raw["state_dict"]
+    if src.suffix == ".safetensors":
+        from safetensors.torch import load_file
+
+        raw = load_file(str(src), device="cpu")
+    else:
+        raw = torch.load(src, map_location="cpu")
+        if isinstance(raw, dict) and "state_dict" in raw:
+            raw = raw["state_dict"]
     if not isinstance(raw, dict):
         raise RuntimeError(f"Unexpected checkpoint type: {type(raw)}")
 
