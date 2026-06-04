@@ -38,12 +38,19 @@ class SpeakerTokenizerPipeline:
         lit.eval()
         lit.to(self.device)
         self.model: SpeakerTokenizer = lit.model
+        # "mel" (ECAPA) or "waveform" (WavLM) — round-trips via model_cfg.encoder.
+        self.input_kind = self.model.input_kind
 
         if mel_cfg is None:
-            hp_mel = lit.hparams.get("model_cfg", {})  # not directly storing mel
             mel_cfg = MelConfig()  # defaults: 16 kHz / 128 mels / linear — matches BiCodec
         self.mel_cfg = mel_cfg
-        self.mel = MelSpectrogramFeature(mel_cfg).to(self.device)
+        # Mel transform is only needed for the ECAPA (mel) path; for WavLM the
+        # backbone consumes raw waveform and normalizes internally.
+        self.mel = (
+            MelSpectrogramFeature(mel_cfg).to(self.device)
+            if self.input_kind == "mel"
+            else None
+        )
 
     # ------------------------------------------------------------------
     # Audio helpers
@@ -59,15 +66,18 @@ class SpeakerTokenizerPipeline:
             )
         return wav.to(self.device)  # (1, T)
 
-    def _to_mel(self, audio: AudioInput) -> torch.Tensor:
+    def _to_input(self, audio: AudioInput) -> torch.Tensor:
+        """Prepare the model input: mel (B, n_mels, T) for ECAPA, or raw
+        waveform (B, T) for WavLM, depending on the loaded encoder."""
         if isinstance(audio, (str, Path)):
             wav = self._load_wav(audio)  # (1, T)
         else:
             wav = audio.to(self.device)
             if wav.dim() == 1:
                 wav = wav.unsqueeze(0)
-        mel = self.mel(wav)  # (B, n_mels, T)
-        return mel
+        if self.input_kind == "waveform":
+            return wav  # (B, T)
+        return self.mel(wav)  # (B, n_mels, T)
 
     # ------------------------------------------------------------------
     # Public API
@@ -75,8 +85,8 @@ class SpeakerTokenizerPipeline:
 
     @torch.no_grad()
     def tokenize(self, audio: AudioInput) -> torch.Tensor:
-        mel = self._to_mel(audio)
-        return self.model.tokenize(mel)
+        inp = self._to_input(audio)
+        return self.model.tokenize(inp)
 
     @torch.no_grad()
     def detokenize(self, indices: torch.Tensor) -> torch.Tensor:
@@ -85,10 +95,16 @@ class SpeakerTokenizerPipeline:
     @torch.no_grad()
     def encode(self, audio: AudioInput) -> dict:
         """Return all forward outputs: x_vector, d_vector, indices."""
-        mel = self._to_mel(audio)
-        x_vec, d_vec, indices = self.model(mel)
+        inp = self._to_input(audio)
+        x_vec, d_vec, indices = self.model(inp)
         return {"x_vector": x_vec, "d_vector": d_vec, "indices": indices}
 
     @torch.no_grad()
     def tokenize_from_mel(self, mel: torch.Tensor) -> torch.Tensor:
+        """Tokenize from a precomputed mel (ECAPA path only)."""
+        if self.input_kind != "mel":
+            raise RuntimeError(
+                "tokenize_from_mel is only valid for the ECAPA (mel) encoder; "
+                f"this checkpoint uses input_kind={self.input_kind!r}."
+            )
         return self.model.tokenize(mel.to(self.device))

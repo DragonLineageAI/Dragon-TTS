@@ -34,6 +34,10 @@ def main(cfg: DictConfig) -> None:
 
     mel_cfg = MelConfig(**_to_python(cfg.mel))
 
+    # ecapa → mel features; wavlm → raw waveform.
+    encoder_type = cfg.model.encoder.type
+    input_kind = "waveform" if encoder_type == "wavlm" else "mel"
+
     dm = SpeakerDataModule(
         manifest=cfg.data.manifest,
         val_manifest=cfg.data.get("val_manifest", None),
@@ -44,13 +48,14 @@ def main(cfg: DictConfig) -> None:
         batch_size=cfg.data.batch_size,
         num_workers=cfg.data.num_workers,
         seed=cfg.data.seed,
+        input_kind=input_kind,
     )
 
     lit = SpeakerTokenizerLit(
         model_cfg=_to_python(cfg.model),
         loss_weights=_to_python(cfg.loss_weights),
         optim_cfg=_to_python(cfg.optim),
-        ecapa_ckpt=str(cfg.ecapa_ckpt) if cfg.ecapa_ckpt else None,
+        ecapa_ckpt=str(cfg.ecapa_ckpt) if cfg.get("ecapa_ckpt") else None,
     )
 
     out_dir = Path(cfg.output_dir) / cfg.run_name

@@ -7,6 +7,9 @@ Hỗ trợ:
   - Checkpoint ECAPA standalone: keys đã ở đúng dạng `<X>`.
 
 Output là dict trực tiếp khớp với `ECAPA_TDNN_GLOB_c512(feat_dim=128, embed_dim=1024)`.
+
+Chỉ cần cho encoder `type=ecapa`. Encoder `type=wavlm` không cần script này —
+trọng số nạp qua `WavLMForXVector.from_pretrained(...)` lúc khởi tạo backbone.
 """
 
 from __future__ import annotations

@@ -5,16 +5,29 @@ Hệ thống TTS dạng modular. Phần hiện tại đã implement là **speake
 Thiết kế speaker tokenizer lấy cảm hứng từ phần global-token của [SparkVox BiCodec](https://github.com/SparkAudio/SparkVox), nhưng tách rời hoàn toàn khỏi semantic encoder / audio reconstruction:
 
 ```
-audio (24 kHz) → mel (128 mels) → [frozen ECAPA-TDNN] → x_vector (1024-d)
-                                                     ↘ features (1536, T)
-                                                       → PerceiverResampler → (32, 128)
-                                                       → ResidualFSQ (levels=[4]*6) → indices (1, 32)
-                                                       → project → d_vector (1024-d)
+                ┌─ [frozen ECAPA-TDNN]  (mel 128, 16 kHz)  → x_vector (1024-d), features (1536, T)
+audio (16 kHz) ─┤
+                └─ [frozen WavLM-base-plus-sv] (waveform)   → x_vector (512-d),  features (768, T)
+                                                     ↓
+                          features → PerceiverResampler → (32, 128)
+                                   → ResidualFSQ (levels=[4]*6) → indices (1, 32)
+                                   → project → d_vector (== x_vector dim)
 
 loss = MSE(d_vector, x_vector.detach())  [+ optional cosine loss]
 ```
 
-Chỉ phần **PerceiverResampler + ResidualFSQ + projection** được train. ECAPA-TDNN load từ pretrained checkpoint và freeze.
+Chỉ phần **PerceiverResampler + ResidualFSQ + projection** được train. Speaker encoder (ECAPA-TDNN hoặc WavLM) luôn **frozen** và ở `eval()` mode.
+
+### Lựa chọn speaker encoder
+
+Encoder chọn qua config block `model.encoder.type`, áp dụng cho cả training lẫn inference (encoder được lưu trong checkpoint nên inference tự nhận đúng loại):
+
+| `encoder.type` | Input            | x_vector / out_dim | context_dim | Trọng số                                   |
+| -------------- | ---------------- | ------------------ | ----------- | ------------------------------------------ |
+| `ecapa`        | mel 128 @ 16 kHz | 1024               | 1536        | `encoder.ckpt` (từ `load_ecapa_ckpt.py`)   |
+| `wavlm`        | waveform @ 16 kHz| 512                | 768         | `from_pretrained` (`microsoft/wavlm-base-plus-sv`) |
+
+`out_dim` và `context_dim` được suy ra tự động từ backbone — không cần chỉnh hyperparameter nào khác. Dataset tự emit mel hay waveform tuỳ `encoder.type`.
 
 ## Cấu trúc thư mục
 
@@ -26,12 +39,13 @@ dragon_tts/
 │   └── perceiver_encoder.py  # PerceiverResampler
 └── speaker_tokenizer/        # Component speaker tokenizer
     ├── model.py              # `SpeakerTokenizer` nn.Module
+    ├── backbones.py          # SpeakerBackbone: EcapaBackbone / WavLMBackbone + build_backbone
     ├── data/                 # mel, audio_dataset, datamodule
     ├── training/lit_module.py
     └── inference/api.py
-configs/speaker_tokenizer/    # Hydra configs
+configs/speaker_tokenizer/    # Hydra configs: base.yaml (ecapa), wavlm.yaml
 scripts/speaker_tokenizer/    # train.py, load_ecapa_ckpt.py, sanity_check.py
-tests/speaker_tokenizer/      # round-trip unit tests
+tests/speaker_tokenizer/      # round-trip unit tests (ecapa + wavlm)
 ```
 
 Khi thêm component mới (vocoder, semantic_tokenizer...), tạo sibling trong từng top-level tree (`dragon_tts/<comp>/`, `scripts/<comp>/`, `tests/<comp>/`, `configs/<comp>/`).
@@ -40,7 +54,9 @@ Khi thêm component mới (vocoder, semantic_tokenizer...), tạo sibling trong 
 
 ```bash
 pip install -e .
+# WavLM encoder cần thêm `transformers` (>=4.40).
 
+# ===== Option A: ECAPA-TDNN encoder (--config-name base) =====
 # 1. Extract ECAPA weights từ checkpoint (BiCodec ckpt hoặc ECAPA standalone)
 python scripts/speaker_tokenizer/load_ecapa_ckpt.py \
     --src <user_ckpt.pt> --dst ./ckpts/ecapa_tdnn.pt
@@ -48,9 +64,14 @@ python scripts/speaker_tokenizer/load_ecapa_ckpt.py \
 # 2. Train
 python scripts/speaker_tokenizer/train.py --config-name base \
     data.manifest=<train.jsonl> \
-    ecapa_ckpt=./ckpts/ecapa_tdnn.pt
+    model.encoder.ckpt=./ckpts/ecapa_tdnn.pt
 
-# 3. Sanity check
+# ===== Option B: WavLM-base-plus-sv encoder (--config-name wavlm) =====
+# Không cần extract ckpt — trọng số nạp qua from_pretrained.
+python scripts/speaker_tokenizer/train.py --config-name wavlm \
+    data.manifest=<train.jsonl>
+
+# 3. Sanity check (tự nhận encoder từ checkpoint)
 python scripts/speaker_tokenizer/sanity_check.py \
     ckpt=./outputs/.../best.ckpt manifest=<eval.jsonl>
 ```
@@ -63,12 +84,14 @@ Manifest format (JSONL, mỗi dòng):
 
 ## Inference
 
+Pipeline tự đọc loại encoder từ checkpoint và tiền xử lý audio đúng cách (mel cho ECAPA, waveform cho WavLM) — API giống nhau cho cả hai:
+
 ```python
 from dragon_tts.speaker_tokenizer.inference.api import SpeakerTokenizerPipeline
 
 pipe = SpeakerTokenizerPipeline(ckpt_path="path/to/best.ckpt", device="cuda")
 indices = pipe.tokenize("audio.wav")          # (1, num_quantizers, token_num) — global tokens
-d_vector = pipe.detokenize(indices)            # (1, 1024)
+d_vector = pipe.detokenize(indices)            # (1, out_dim): 1024 (ecapa) hoặc 512 (wavlm)
 ```
 
 ## Licensing

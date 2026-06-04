@@ -1,0 +1,23 @@
+# WavLM speaker-tokenizer config (microsoft/wavlm-base-plus-sv encoder).
+# Inherits everything from base.yaml and swaps the encoder to WavLM.
+# Usage:
+#   python scripts/speaker_tokenizer/train.py --config-name wavlm \
+#       data.manifest=/path/train.jsonl
+# No ECAPA ckpt needed — WavLM weights load via from_pretrained.
+#
+# The reconstruction target becomes WavLM's native 512-d xvector embedding;
+# context_dim (768) and out_dim (512) are derived from the backbone, so no
+# other model hyperparameters need changing. The dataset emits raw 16 kHz
+# waveform (input_kind is derived from encoder.type in train.py).
+
+defaults:
+  - base
+  - _self_
+
+model:
+  encoder:
+    type: wavlm
+    pretrained: microsoft/wavlm-base-plus-sv   # HF id, or a local snapshot path
+    do_normalize: true
+    freeze: true
+    ckpt: null        # no separate checkpoint; weights from from_pretrained

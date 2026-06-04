@@ -42,10 +42,17 @@ class SpeakerAudioDatasetConfig:
     crop_seconds: float = 4.0
     min_seconds: float = 1.0
     deterministic_crop: bool = False  # True for val/eval
+    # "mel"  → emit linear mel (B, n_mels, T) for the ECAPA backbone.
+    # "waveform" → emit raw 16 kHz waveform (B, T) for the WavLM backbone.
+    input_kind: str = "mel"
 
 
 class SpeakerAudioDataset(Dataset):
-    """Mỗi item: `{wav_path, speaker_id?}` → mel `(n_mels, T_frames)`."""
+    """Mỗi item: `{wav_path, speaker_id?}` → `input` (mel hoặc waveform).
+
+    `input` là mel `(n_mels, T_frames)` khi `input_kind=="mel"`, hoặc waveform
+    `(T_samples,)` khi `input_kind=="waveform"`.
+    """
 
     def __init__(
         self,
@@ -80,21 +87,29 @@ class SpeakerAudioDataset(Dataset):
             pad = self.min_samples - wav.shape[0]
             wav = torch.nn.functional.pad(wav, (0, pad))
         wav = self._crop(wav)
-        mel = self.mel_fn(wav.unsqueeze(0)).squeeze(0)  # (n_mels, T)
+        if self.cfg.input_kind == "waveform":
+            inp = wav  # (T_samples,)
+        else:
+            inp = self.mel_fn(wav.unsqueeze(0)).squeeze(0)  # (n_mels, T)
         return {
-            "mel": mel,
+            "input": inp,
             "speaker_id": item.get("speaker_id", ""),
             "wav_path": item["wav_path"],
         }
 
 
-def collate_mels(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-    mels = torch.stack([b["mel"] for b in batch], dim=0)
+def collate_inputs(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Stack the per-item `input` tensor (mel or waveform; uniform length)."""
+    inputs = torch.stack([b["input"] for b in batch], dim=0)
     return {
-        "mel": mels,
+        "input": inputs,
         "speaker_id": [b["speaker_id"] for b in batch],
         "wav_path": [b["wav_path"] for b in batch],
     }
+
+
+# Backward-compatible alias.
+collate_mels = collate_inputs
 
 
 def load_manifest(

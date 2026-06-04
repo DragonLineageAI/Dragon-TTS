@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from dragon_tts.speaker_tokenizer.data.audio_dataset import (
     SpeakerAudioDataset,
     SpeakerAudioDatasetConfig,
-    collate_mels,
+    collate_inputs,
     load_manifest,
     split_by_speaker,
 )
@@ -29,6 +29,7 @@ class SpeakerDataModule(pl.LightningDataModule):
         batch_size: int = 64,
         num_workers: int = 4,
         seed: int = 0,
+        input_kind: str = "mel",
     ):
         super().__init__()
         self.manifest = manifest
@@ -40,6 +41,7 @@ class SpeakerDataModule(pl.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.seed = seed
+        self.input_kind = input_kind
 
         self.train_ds: Optional[SpeakerAudioDataset] = None
         self.val_ds: Optional[SpeakerAudioDataset] = None
@@ -61,12 +63,14 @@ class SpeakerDataModule(pl.LightningDataModule):
             crop_seconds=self.crop_seconds,
             min_seconds=self.min_seconds,
             deterministic_crop=False,
+            input_kind=self.input_kind,
         )
         val_cfg = SpeakerAudioDatasetConfig(
             mel=self.mel_cfg,
             crop_seconds=self.crop_seconds,
             min_seconds=self.min_seconds,
             deterministic_crop=True,
+            input_kind=self.input_kind,
         )
         self.train_ds = SpeakerAudioDataset(train_items, train_cfg)
         self.val_ds = SpeakerAudioDataset(val_items, val_cfg)
@@ -79,7 +83,7 @@ class SpeakerDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             drop_last=True,
-            collate_fn=collate_mels,
+            collate_fn=collate_inputs,
             persistent_workers=self.num_workers > 0,
         )
 
@@ -91,6 +95,6 @@ class SpeakerDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             drop_last=False,
-            collate_fn=collate_mels,
+            collate_fn=collate_inputs,
             persistent_workers=self.num_workers > 0,
         )

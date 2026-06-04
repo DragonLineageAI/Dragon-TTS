@@ -1,25 +1,29 @@
-# Base config for Dragon-TTS speaker tokenizer.
+# Base config for Dragon-TTS speaker tokenizer (ECAPA-TDNN encoder, default).
 # Usage:
-#   python scripts/train.py --config-name base \
+#   python scripts/speaker_tokenizer/train.py --config-name base \
 #       data.manifest=/path/train.jsonl \
-#       ecapa_ckpt=/path/ecapa_tdnn.pt
+#       model.encoder.ckpt=/path/ecapa_tdnn.pt
+# For the WavLM encoder, use `--config-name wavlm` (no ckpt needed).
 
 defaults:
   - _self_
 
-# ECAPA checkpoint (state_dict for ECAPA_TDNN_GLOB_c512(feat_dim=128, embed_dim=1024)).
-ecapa_ckpt: ???
-
 # SpeakerTokenizer hyperparams.
 model:
-  input_dim: 128
-  out_dim: 1024
   latent_dim: 128
   token_num: 32
   fsq_levels: [4, 4, 4, 4, 4, 4]
   fsq_num_quantizers: 1
   perceiver_depth: 2
-  ecapa_channels: 512
+  # Speaker-embedding backbone. type=ecapa → mel features; type=wavlm → waveform.
+  encoder:
+    type: ecapa
+    feat_dim: 128
+    embed_dim: 1024
+    channels: 512
+    # state_dict for ECAPA_TDNN_GLOB_c512(feat_dim=128, embed_dim=1024),
+    # produced by scripts/speaker_tokenizer/load_ecapa_ckpt.py.
+    ckpt: ???
 
 # Mel-spectrogram — LINEAR mel (KHÔNG log), khớp
 # checkpoints/Spark-TTS-0.5B/BiCodec/config.yaml (mel_params).

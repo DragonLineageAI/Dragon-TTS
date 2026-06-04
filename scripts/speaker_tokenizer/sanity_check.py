@@ -20,7 +20,7 @@ from tqdm import tqdm
 from dragon_tts.speaker_tokenizer.data.audio_dataset import (
     SpeakerAudioDataset,
     SpeakerAudioDatasetConfig,
-    collate_mels,
+    collate_inputs,
     load_manifest,
 )
 from dragon_tts.speaker_tokenizer.data.mel import MelConfig
@@ -43,6 +43,9 @@ def main(cfg: DictConfig) -> None:
     lit.to(device)
     model = lit.model
 
+    # "mel" (ECAPA) hoặc "waveform" (WavLM) — lấy từ encoder của checkpoint.
+    input_kind = model.input_kind
+
     mel_cfg = MelConfig(**OmegaConf.to_container(cfg.mel, resolve=True))
     items = load_manifest(str(cfg.manifest))
     ds = SpeakerAudioDataset(
@@ -52,6 +55,7 @@ def main(cfg: DictConfig) -> None:
             crop_seconds=cfg.data.crop_seconds,
             min_seconds=cfg.data.min_seconds,
             deterministic_crop=True,
+            input_kind=input_kind,
         ),
     )
     loader = DataLoader(
@@ -59,7 +63,7 @@ def main(cfg: DictConfig) -> None:
         batch_size=cfg.data.batch_size,
         shuffle=False,
         num_workers=cfg.data.num_workers,
-        collate_fn=collate_mels,
+        collate_fn=collate_inputs,
     )
 
     codebook_size = model.codebook_size
@@ -75,8 +79,8 @@ def main(cfg: DictConfig) -> None:
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="eval"):
-            mel = batch["mel"].to(device)
-            x_vec, d_vec, indices = model(mel)
+            inp = batch["input"].to(device)
+            x_vec, d_vec, indices = model(inp)
             cos_sims.append(F.cosine_similarity(d_vec, x_vec, dim=-1).cpu())
             mses.append(F.mse_loss(d_vec, x_vec, reduction="none").mean(dim=-1).cpu())
 

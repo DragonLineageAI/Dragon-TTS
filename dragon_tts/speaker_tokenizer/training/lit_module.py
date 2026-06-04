@@ -57,14 +57,25 @@ class SpeakerTokenizerLit(pl.LightningModule):
         self.save_hyperparameters()
 
         self.model = SpeakerTokenizer(**model_cfg)
-        if ecapa_ckpt is not None:
-            sd = torch.load(ecapa_ckpt, map_location="cpu")
+
+        # Resolve the encoder checkpoint: prefer `model_cfg["encoder"]["ckpt"]`,
+        # fall back to the deprecated top-level `ecapa_ckpt` arg.
+        encoder_cfg = model_cfg.get("encoder") or {}
+        enc_ckpt = encoder_cfg.get("ckpt") if isinstance(encoder_cfg, dict) else None
+        if enc_ckpt is None:
+            enc_ckpt = ecapa_ckpt
+
+        if enc_ckpt is not None:
+            # ECAPA: load external state_dict, then freeze.
+            sd = torch.load(enc_ckpt, map_location="cpu")
             if isinstance(sd, dict) and "state_dict" in sd:
                 sd = sd["state_dict"]
-            self.model.load_ecapa_state_dict(sd, strict=True)
+            self.model.load_encoder_state_dict(sd, strict=True)
         else:
-            # Vẫn freeze (random ECAPA = nonsense, nhưng đảm bảo invariants).
-            self.model.freeze_ecapa()
+            # No external ckpt — WavLM already loaded its weights via
+            # from_pretrained; ECAPA without a ckpt is random (nonsense, but we
+            # still freeze to preserve invariants).
+            self.model.freeze_encoder()
 
         self.loss_weights = LossWeights(**loss_weights)
         self.optim_cfg = OptimConfig(**optim_cfg)
@@ -73,8 +84,8 @@ class SpeakerTokenizerLit(pl.LightningModule):
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(self, mel: torch.Tensor):
-        return self.model(mel)
+    def forward(self, x: torch.Tensor):
+        return self.model(x)
 
     # ------------------------------------------------------------------
     # Loss + metrics
@@ -114,11 +125,11 @@ class SpeakerTokenizerLit(pl.LightningModule):
     # ------------------------------------------------------------------
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int):
-        mel = batch["mel"]
-        x_vec, d_vec, indices = self.model(mel)
+        inp = batch["input"]
+        x_vec, d_vec, indices = self.model(inp)
         losses = self._compute_losses(x_vec, d_vec, indices)
 
-        bs = mel.shape[0]
+        bs = inp.shape[0]
         for k, v in losses.items():
             self.log(
                 f"train/{k}",
@@ -131,11 +142,11 @@ class SpeakerTokenizerLit(pl.LightningModule):
         return losses["loss"]
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
-        mel = batch["mel"]
-        x_vec, d_vec, indices = self.model(mel)
+        inp = batch["input"]
+        x_vec, d_vec, indices = self.model(inp)
         losses = self._compute_losses(x_vec, d_vec, indices)
 
-        bs = mel.shape[0]
+        bs = inp.shape[0]
         for k, v in losses.items():
             self.log(
                 f"val/{k}",
