@@ -1,0 +1,32 @@
+Dragon-TTS
+==========
+
+This project bundles code adapted from SparkVox (https://github.com/SparkAudio/SparkVox),
+licensed under the Apache License, Version 2.0.
+
+Vendored files:
+  - dragon_tts/models/ecapa/ecapa_tdnn.py
+    Original: sparkvox/models/base/modules/ecapa_tdnn.py
+    Copyright (c) 2021 Zhengyang Chen
+                  2022 Hongji Wang
+                  2023 Bing Han
+
+  - dragon_tts/models/ecapa/pooling_layers.py
+    Original: sparkvox/models/base/modules/pooling_layers.py
+    Copyright (c) 2021 Shuai Wang
+
+  - dragon_tts/models/perceiver_encoder.py
+    Original: sparkvox/models/base/modules/perceiver_encoder.py
+    Copyright (c) 2025 Xinsheng Wang
+    Adapted from naturalspeech2-pytorch by lucidrains.
+
+  - dragon_tts/models/fsq/residual_fsq.py
+    Original: sparkvox/models/base/fsq/residual_fsq.py
+
+  - dragon_tts/models/fsq/finite_scalar_quantization.py
+    Original: sparkvox/models/base/fsq/finite_scalar_quantization.py
+    Implements: Finite Scalar Quantization (https://arxiv.org/abs/2309.15505)
+
+All vendored files retain their original Apache-2.0 license headers.
+A copy of the Apache-2.0 license text is available at:
+    http://www.apache.org/licenses/LICENSE-2.0
