@@ -8,7 +8,7 @@ from typing import Optional, Union
 import torch
 import torchaudio
 
-from dragon_tts.speaker_tokenizer.data.mel import LogMelSpectrogram, MelConfig
+from dragon_tts.speaker_tokenizer.data.mel import MelConfig, MelSpectrogramFeature
 from dragon_tts.speaker_tokenizer.model import SpeakerTokenizer
 from dragon_tts.speaker_tokenizer.training.lit_module import SpeakerTokenizerLit
 
@@ -41,9 +41,9 @@ class SpeakerTokenizerPipeline:
 
         if mel_cfg is None:
             hp_mel = lit.hparams.get("model_cfg", {})  # not directly storing mel
-            mel_cfg = MelConfig()  # defaults are 24 kHz / 128 mels — matches BiCodec
+            mel_cfg = MelConfig()  # defaults: 16 kHz / 128 mels / linear — matches BiCodec
         self.mel_cfg = mel_cfg
-        self.mel = LogMelSpectrogram(mel_cfg).to(self.device)
+        self.mel = MelSpectrogramFeature(mel_cfg).to(self.device)
 
     # ------------------------------------------------------------------
     # Audio helpers

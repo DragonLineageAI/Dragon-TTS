@@ -1,4 +1,11 @@
-"""Mel-spectrogram transform khớp với cấu hình BiCodec 24 kHz."""
+"""Mel-spectrogram transform khớp với cấu hình BiCodec (Spark-TTS-0.5B).
+
+QUAN TRỌNG: ECAPA trong BiCodec được train trên mel **tuyến tính** (power=1,
+KHÔNG lấy log). SparkVox `Generator.init_mel_transformer` đưa thẳng output của
+`torchaudio MelSpectrogram` vào speaker encoder mà không có log/clamp. Bón log-mel
+vào sẽ làm lệch phân phối của các BatchNorm (frozen) trong ECAPA → x_vector nổ
+(norm ~1e6) và MSE không học được.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +19,8 @@ import torchaudio.transforms as TT
 
 @dataclass
 class MelConfig:
-    sample_rate: int = 24000
+    # Khớp checkpoints/Spark-TTS-0.5B/BiCodec/config.yaml (mel_params).
+    sample_rate: int = 16000
     n_fft: int = 1024
     win_length: int = 640
     hop_length: int = 320
@@ -21,8 +29,8 @@ class MelConfig:
     f_max: Optional[float] = None  # None ⇒ sample_rate / 2
 
 
-class LogMelSpectrogram(nn.Module):
-    """Mel-spec + log; sao chép `Generator.init_mel_transformer` của BiCodec."""
+class MelSpectrogramFeature(nn.Module):
+    """Linear mel-spectrogram; sao chép `Generator.init_mel_transformer` của BiCodec."""
 
     def __init__(self, cfg: MelConfig):
         super().__init__()
@@ -45,11 +53,10 @@ class LogMelSpectrogram(nn.Module):
             wav: (B, T) hoặc (B, 1, T) hoặc (T,).
 
         Returns:
-            log-mel: (B, n_mels, T_frames).
+            linear mel: (B, n_mels, T_frames). KHÔNG lấy log (xem docstring module).
         """
         if wav.dim() == 1:
             wav = wav.unsqueeze(0)
         if wav.dim() == 3:
             wav = wav.squeeze(1)
-        mel = self.mel(wav)
-        return torch.log(mel.clamp(min=1e-5))
+        return self.mel(wav)

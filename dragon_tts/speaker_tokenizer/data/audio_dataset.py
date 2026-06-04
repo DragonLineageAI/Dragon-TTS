@@ -12,7 +12,7 @@ import torch
 import torchaudio
 from torch.utils.data import Dataset
 
-from dragon_tts.speaker_tokenizer.data.mel import LogMelSpectrogram, MelConfig
+from dragon_tts.speaker_tokenizer.data.mel import MelConfig, MelSpectrogramFeature
 
 
 def _load_manifest(path: str) -> List[Dict[str, Any]]:
@@ -54,7 +54,7 @@ class SpeakerAudioDataset(Dataset):
     ):
         self.items = manifest
         self.cfg = cfg
-        self.mel_fn = LogMelSpectrogram(cfg.mel)
+        self.mel_fn = MelSpectrogramFeature(cfg.mel)
         self.crop_samples = int(cfg.crop_seconds * cfg.mel.sample_rate)
         self.min_samples = int(cfg.min_seconds * cfg.mel.sample_rate)
 

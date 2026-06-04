@@ -21,9 +21,10 @@ model:
   perceiver_depth: 2
   ecapa_channels: 512
 
-# Mel-spectrogram (khớp SparkVox bicodec.24k.yaml).
+# Mel-spectrogram — LINEAR mel (KHÔNG log), khớp
+# checkpoints/Spark-TTS-0.5B/BiCodec/config.yaml (mel_params).
 mel:
-  sample_rate: 24000
+  sample_rate: 16000
   n_fft: 1024
   win_length: 640
   hop_length: 320
