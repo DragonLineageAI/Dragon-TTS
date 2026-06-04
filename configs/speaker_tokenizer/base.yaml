@@ -32,7 +32,12 @@ mel:
   f_max: null
 
 data:
+  # 1 file: data.manifest=train.jsonl
+  # Nhiều file: data.manifest=[a.jsonl,b.jsonl,c.jsonl]
   manifest: ???
+  # Val manifest riêng (str hoặc list). Nếu null -> tách held-out theo speaker
+  # từ `manifest` bằng `val_speaker_frac`.
+  val_manifest: null
   crop_seconds: 4.0
   min_seconds: 1.0
   val_speaker_frac: 0.05

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional, Union
 
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
@@ -20,8 +20,9 @@ from dragon_tts.speaker_tokenizer.data.mel import MelConfig
 class SpeakerDataModule(pl.LightningDataModule):
     def __init__(
         self,
-        manifest: str,
+        manifest: Union[str, Iterable[str]],
         mel_cfg: MelConfig,
+        val_manifest: Optional[Union[str, Iterable[str]]] = None,
         crop_seconds: float = 4.0,
         min_seconds: float = 1.0,
         val_speaker_frac: float = 0.05,
@@ -31,6 +32,7 @@ class SpeakerDataModule(pl.LightningDataModule):
     ):
         super().__init__()
         self.manifest = manifest
+        self.val_manifest = val_manifest
         self.mel_cfg = mel_cfg
         self.crop_seconds = crop_seconds
         self.min_seconds = min_seconds
@@ -43,10 +45,16 @@ class SpeakerDataModule(pl.LightningDataModule):
         self.val_ds: Optional[SpeakerAudioDataset] = None
 
     def setup(self, stage: Optional[str] = None) -> None:
-        items = load_manifest(self.manifest)
-        train_items, val_items = split_by_speaker(
-            items, self.val_speaker_frac, seed=self.seed
-        )
+        if self.val_manifest is not None:
+            # Val là manifest riêng → dùng trọn vẹn train + val, không split.
+            train_items = load_manifest(self.manifest)
+            val_items = load_manifest(self.val_manifest)
+        else:
+            # Không có val manifest → tách held-out theo speaker từ train.
+            items = load_manifest(self.manifest)
+            train_items, val_items = split_by_speaker(
+                items, self.val_speaker_frac, seed=self.seed
+            )
 
         train_cfg = SpeakerAudioDatasetConfig(
             mel=self.mel_cfg,

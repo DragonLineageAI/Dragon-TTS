@@ -6,7 +6,7 @@ import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import torch
 import torchaudio
@@ -97,8 +97,17 @@ def collate_mels(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def load_manifest(path: str) -> List[Dict[str, Any]]:
-    return _load_manifest(path)
+def load_manifest(
+    path: Union[str, Iterable[str]]
+) -> List[Dict[str, Any]]:
+    """Đọc một hoặc nhiều file JSONL. `path` có thể là str hoặc list[str]
+    (kể cả Hydra ListConfig). Nhiều file sẽ được nối lại theo thứ tự."""
+    if isinstance(path, str):
+        return _load_manifest(path)
+    items: List[Dict[str, Any]] = []
+    for p in path:
+        items.extend(_load_manifest(p))
+    return items
 
 
 def split_by_speaker(

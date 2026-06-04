@@ -36,6 +36,7 @@ def main(cfg: DictConfig) -> None:
 
     dm = SpeakerDataModule(
         manifest=cfg.data.manifest,
+        val_manifest=cfg.data.get("val_manifest", None),
         mel_cfg=mel_cfg,
         crop_seconds=cfg.data.crop_seconds,
         min_seconds=cfg.data.min_seconds,
