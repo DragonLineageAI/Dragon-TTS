@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import soundfile as sf
 import torch
 import torchaudio
 from torch.utils.data import Dataset
@@ -98,10 +99,10 @@ class LJSpeechCsvDataset(Dataset):
             else ""
         )
 
-        wav, sr = torchaudio.load(wav_path)  # (C, T)
-        if wav.shape[0] > 1:
-            wav = wav.mean(dim=0, keepdim=True)
-        wav = wav.squeeze(0)  # (T,)
+        data, sr = sf.read(wav_path, dtype="float32")  # (T,) or (T, C)
+        if data.ndim == 2:
+            data = data.mean(axis=1)
+        wav = torch.from_numpy(data)  # (T,)
 
         wav_codec = (
             torchaudio.functional.resample(wav, sr, self._codec_sr)

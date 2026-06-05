@@ -35,8 +35,8 @@ import json
 import sys
 from pathlib import Path
 
+import soundfile as sf
 import torch
-import torchaudio
 
 from dragon_tts.llm_tts.codec_base import AudioCodec
 from dragon_tts.llm_tts.sequence import parse_sequence
@@ -199,7 +199,7 @@ def main() -> None:
     # ── 4. Save WAV ───────────────────────────────────────────────────
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    torchaudio.save(str(out_path), waveform.unsqueeze(0), out_sr)
+    sf.write(str(out_path), waveform.numpy(), out_sr)
     print(f"✓ Saved to {out_path}")
 
 

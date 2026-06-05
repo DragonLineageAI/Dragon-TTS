@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
+import soundfile as sf
 import torch
 import torchaudio
 
@@ -73,10 +74,10 @@ class OrpheusTTSPipeline:
     # ------------------------------------------------------------------
     def _load_ref_16k(self, ref: AudioInput) -> torch.Tensor:
         if isinstance(ref, (str, Path)):
-            wav, sr = torchaudio.load(str(ref))
-            if wav.shape[0] > 1:
-                wav = wav.mean(dim=0, keepdim=True)
-            wav = wav.squeeze(0)
+            data, sr = sf.read(str(ref), dtype="float32")
+            if data.ndim == 2:
+                data = data.mean(axis=1)
+            wav = torch.from_numpy(data)
             if sr != SPEAKER_SR:
                 wav = torchaudio.functional.resample(wav, sr, SPEAKER_SR)
         else:
