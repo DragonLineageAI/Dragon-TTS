@@ -1,0 +1,62 @@
+# Base config for Dragon-TTS LLM-TTS (Orpheus-style, Qwen3-0.6B backbone).
+#
+# Pipeline:
+#   1) build_tokenizer.py  -> extended tokenizer (+ optional resized model)
+#   2) build_training_data.py -> JSONL of {"text": <sequence>} for LLM training
+#   3) (you train the LLM separately)
+#   4) infer.py / infer_vllm.py -> synthesize speech
+
+defaults:
+  - _self_
+
+# --- shared ---
+base_model: Qwen/Qwen3-0.6B
+snac_model: hubertsiuzdak/snac_24khz
+device: cuda
+# Trained speaker-tokenizer Lightning checkpoint (required for data build + inference).
+speaker_ckpt: ???
+# Length (seconds) of the center crop fed to the speaker tokenizer (matches its
+# training crop distribution; the global speaker embedding is length-invariant).
+speaker_crop_seconds: 4.0
+
+# --- build_tokenizer.py ---
+tokenizer:
+  out_dir: ./ckpts/llm_tts_tokenizer
+  save_model: false      # true -> also resize + save the base model embeddings
+  mean_init_new: true    # init new embedding rows with mean of existing rows
+
+# --- build_training_data.py ---
+# Input: LJSpeech-style CSV. Output: JSONL of {"text": ...}.
+data:
+  csv_path: ???          # e.g. /path/LJSpeech-1.1/metadata.csv
+  wavs_dir: null         # e.g. /path/LJSpeech-1.1/wavs (null -> id_col holds a path)
+  wav_ext: .wav
+  delimiter: "|"
+  has_header: false
+  id_col: 0
+  text_col: 2            # LJSpeech normalized transcription
+  text_fallback_col: 1   # raw transcription if normalized is empty
+  speaker_col: null
+  batch_size: 16
+  num_workers: 8
+output: ???              # e.g. ./data/llm_tts_train.jsonl
+skip_empty_text: true
+limit: null              # cap number of examples (debug); null = all
+resume: false           # append + skip wav_paths already in <output>.done
+
+# --- inference (infer.py / infer_vllm.py) ---
+model_dir: ???          # fine-tuned LLM + extended tokenizer directory
+infer:
+  text: ???
+  ref_audio: ???
+  out: out.wav
+  max_new_tokens: 2000
+  temperature: 0.6
+  top_p: 0.95
+  repetition_penalty: 1.1
+
+# vLLM-only (infer_vllm.py)
+vllm:
+  dtype: bfloat16
+  max_model_len: 4096
+  gpu_memory_utilization: 0.5

@@ -10,3 +10,8 @@ numpy
 soundfile
 tqdm
 tensorboard
+transformers>=4.51
+# LLM-TTS component (Orpheus-style) — install when building/using it:
+#   snac>=1.2          # SNAC 24 kHz neural codec
+#   datasets>=2.18     # for LLM training data loading
+#   vllm>=0.5          # optional vLLM streaming inference backend (CUDA-only)

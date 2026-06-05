@@ -24,6 +24,7 @@ dependencies = [
     "soundfile",
     "tqdm",
     "tensorboard",
+    "transformers>=4.51",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +32,15 @@ dev = [
     "pytest",
     "scikit-learn",
     "matplotlib",
+]
+# LLM-TTS component (Orpheus-style). SNAC codec + HF datasets for training data.
+llm_tts = [
+    "snac>=1.2",
+    "datasets>=2.18",
+]
+# Optional vLLM streaming inference backend (heavy; CUDA-only).
+vllm = [
+    "vllm>=0.5",
 ]
 
 [tool.setuptools.packages.find]
