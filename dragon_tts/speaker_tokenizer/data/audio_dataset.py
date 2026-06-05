@@ -45,6 +45,11 @@ class SpeakerAudioDatasetConfig:
     # "mel"  → emit linear mel (B, n_mels, T) for the ECAPA backbone.
     # "waveform" → emit raw 16 kHz waveform (B, T) for the WavLM backbone.
     input_kind: str = "mel"
+    # Cách kéo dài clip ngắn hơn crop_seconds:
+    #   "zero"   → đệm 0 (silence) ở cuối.
+    #   "repeat" → lặp (tile) waveform cho đến đủ độ dài → cửa sổ toàn giọng thật,
+    #              tránh contaminate pooling/normalize bằng silence.
+    pad_mode: str = "repeat"
 
 
 class SpeakerAudioDataset(Dataset):
@@ -68,6 +73,16 @@ class SpeakerAudioDataset(Dataset):
     def __len__(self) -> int:
         return len(self.items)
 
+    def _extend(self, wav: torch.Tensor, target: int) -> torch.Tensor:
+        """Kéo dài wav lên `target` mẫu theo `pad_mode` (zero hoặc repeat)."""
+        n = wav.shape[0]
+        if n >= target:
+            return wav
+        if n > 0 and self.cfg.pad_mode == "repeat":
+            reps = -(-target // n)  # ceil(target / n)
+            return wav.repeat(reps)[:target]
+        return torch.nn.functional.pad(wav, (0, target - n))
+
     def _crop(self, wav: torch.Tensor) -> torch.Tensor:
         n = wav.shape[0]
         if n >= self.crop_samples:
@@ -76,16 +91,13 @@ class SpeakerAudioDataset(Dataset):
             else:
                 start = random.randint(0, n - self.crop_samples)
             return wav[start : start + self.crop_samples]
-        # pad to crop_samples
-        pad = self.crop_samples - n
-        return torch.nn.functional.pad(wav, (0, pad))
+        return self._extend(wav, self.crop_samples)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.items[idx]
         wav = _load_wav(item["wav_path"], self.cfg.mel.sample_rate)
         if wav.shape[0] < self.min_samples:
-            pad = self.min_samples - wav.shape[0]
-            wav = torch.nn.functional.pad(wav, (0, pad))
+            wav = self._extend(wav, self.min_samples)
         wav = self._crop(wav)
         if self.cfg.input_kind == "waveform":
             inp = wav  # (T_samples,)

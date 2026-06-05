@@ -56,6 +56,7 @@ def main(cfg: DictConfig) -> None:
             min_seconds=cfg.data.min_seconds,
             deterministic_crop=True,
             input_kind=input_kind,
+            pad_mode=cfg.data.get("pad_mode", "repeat"),
         ),
     )
     loader = DataLoader(

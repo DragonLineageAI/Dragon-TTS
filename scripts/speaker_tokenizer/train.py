@@ -49,6 +49,7 @@ def main(cfg: DictConfig) -> None:
         num_workers=cfg.data.num_workers,
         seed=cfg.data.seed,
         input_kind=input_kind,
+        pad_mode=cfg.data.get("pad_mode", "repeat"),
     )
 
     lit = SpeakerTokenizerLit(
