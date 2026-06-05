@@ -110,6 +110,9 @@ def main(cfg: DictConfig) -> None:
             spk_idx = spk_pipe.tokenize(wavs16)  # (B, 1, 32)
             spk_idx = spk_idx[:, 0, :].cpu().tolist()  # B lists of 32 ids
 
+            # --- SNAC audio tokens (batched) ---
+            all_audio_tokens = snac.batch_encode(batch["wav_24k"])
+
             for i in range(len(batch["wav_path"])):
                 wav_path = batch["wav_path"][i]
                 if wav_path in done:
@@ -117,8 +120,7 @@ def main(cfg: DictConfig) -> None:
                 text = batch["text"][i]
                 if skip_empty and not text:
                     continue
-                audio_tokens = snac.encode(batch["wav_24k"][i])
-                seq = build_sequence(spk_idx[i], text, audio_tokens)
+                seq = build_sequence(spk_idx[i], text, all_audio_tokens[i])
                 out_f.write(json.dumps({"text": seq}, ensure_ascii=False) + "\n")
                 done_f.write(wav_path + "\n")
                 n_written += 1

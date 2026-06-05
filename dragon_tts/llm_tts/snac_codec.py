@@ -34,6 +34,7 @@ class SnacCodec:
 
         self.device = torch.device(device)
         self.model = SNAC.from_pretrained(model_id).eval().to(self.device)
+        self._hop: float | None = None  # probed lazily on first batch_encode
 
     # ------------------------------------------------------------------
     # Encode
@@ -65,6 +66,75 @@ class SnacCodec:
             tokens.append(audio_token(5, int(c2[4 * i + 2])))
             tokens.append(audio_token(6, int(c2[4 * i + 3])))
         return tokens
+
+    @torch.no_grad()
+    def batch_encode(self, wavs_24k: List[torch.Tensor]) -> List[List[str]]:
+        """Batch-encode multiple 24 kHz waveforms into lists of audio tokens.
+
+        Pads all waveforms to the longest in the batch, encodes in a single
+        forward pass, then truncates each sample's codes to the valid
+        (non-padded) region.
+
+        Each ``wavs_24k[i]`` is a 1-D tensor ``(T_i,)``.
+        Returns a list (length B) of token-string lists.
+        """
+        if not wavs_24k:
+            return []
+        if len(wavs_24k) == 1:
+            return [self.encode(wavs_24k[0])]
+
+        # -- probe hop size once ------------------------------------------------
+        if self._hop is None:
+            self._hop = self._probe_hop()
+
+        # -- pad & stack --------------------------------------------------------
+        orig_lengths = [w.numel() for w in wavs_24k]
+        max_len = max(orig_lengths)
+
+        padded = []
+        for w in wavs_24k:
+            flat = w.view(-1)
+            if flat.shape[0] < max_len:
+                flat = torch.nn.functional.pad(flat, (0, max_len - flat.shape[0]))
+            padded.append(flat)
+
+        batch = torch.stack(padded).unsqueeze(1).to(self.device)  # (B, 1, T)
+
+        codes = self.model.encode(batch)  # [(B, n0), (B, n1), (B, n2)]
+        max_frames = codes[0].shape[1]  # frames for the padded length
+
+        # -- per-sample: truncate to valid frames & flatten ---------------------
+        results: List[List[str]] = []
+        for b in range(len(wavs_24k)):
+            n_frames = min(int(orig_lengths[b] / self._hop), max_frames)
+            c0 = codes[0][b]  # (n0,)
+            c1 = codes[1][b]  # (n1 = 2*n0,)
+            c2 = codes[2][b]  # (n2 = 4*n0,)
+
+            tokens: List[str] = []
+            for i in range(n_frames):
+                tokens.append(audio_token(0, int(c0[i])))
+                tokens.append(audio_token(1, int(c1[2 * i])))
+                tokens.append(audio_token(2, int(c2[4 * i])))
+                tokens.append(audio_token(3, int(c2[4 * i + 1])))
+                tokens.append(audio_token(4, int(c1[2 * i + 1])))
+                tokens.append(audio_token(5, int(c2[4 * i + 2])))
+                tokens.append(audio_token(6, int(c2[4 * i + 3])))
+            results.append(tokens)
+
+        return results
+
+    def _probe_hop(self) -> float:
+        """Probe the effective hop size (input samples per coarsest frame).
+
+        Called once and cached in ``self._hop``.
+        """
+        probe_len = SNAC_SAMPLE_RATE * 4  # 4 seconds – long enough for accuracy
+        dummy = torch.zeros(1, 1, probe_len, device=self.device)
+        with torch.no_grad():
+            c = self.model.encode(dummy)
+        n_frames = c[0].shape[1]
+        return probe_len / n_frames
 
     # ------------------------------------------------------------------
     # Decode
