@@ -6,6 +6,14 @@ Usage:
         speaker_ckpt=./ckpts/speaker_tokenizer/last.ckpt \
         infer.text="Hello world" infer.ref_audio=/path/ref.wav \
         infer.out=./out.wav
+
+    # Use NeuCodec:
+    PYTHONPATH=. python scripts/llm_tts/infer.py --config-name base \
+        codec=neucodec \
+        model_dir=./ckpts/llm_tts_qwen3 \
+        speaker_ckpt=./ckpts/speaker_tokenizer/last.ckpt \
+        infer.text="Hello world" infer.ref_audio=/path/ref.wav \
+        infer.out=./out.wav
 """
 
 from __future__ import annotations
@@ -17,7 +25,6 @@ import soundfile as sf
 from omegaconf import DictConfig
 
 from dragon_tts.llm_tts.inference.api import OrpheusTTSPipeline
-from dragon_tts.llm_tts.snac_codec import SNAC_SAMPLE_RATE
 
 
 @hydra.main(
@@ -35,7 +42,9 @@ def main(cfg: DictConfig) -> None:
         model_dir=cfg.model_dir,
         speaker_ckpt=cfg.speaker_ckpt,
         device=cfg.device,
+        codec=cfg.get("codec", "snac"),
         snac_model=cfg.get("snac_model"),
+        neucodec_model=cfg.get("neucodec_model"),
         speaker_crop_seconds=cfg.get("speaker_crop_seconds", 4.0),
     )
     wav = pipe.synthesize(
@@ -46,9 +55,10 @@ def main(cfg: DictConfig) -> None:
         top_p=cfg.infer.get("top_p", 0.95),
         repetition_penalty=cfg.infer.get("repetition_penalty", 1.1),
     )
+    out_sr = pipe.codec.output_sample_rate
     out = cfg.infer.get("out", "out.wav")
-    sf.write(out, wav.numpy(), SNAC_SAMPLE_RATE)
-    print(f"[done] wrote {wav.shape[0]} samples ({wav.shape[0]/SNAC_SAMPLE_RATE:.2f}s) -> {out}")
+    sf.write(out, wav.numpy(), out_sr)
+    print(f"[done] wrote {wav.shape[0]} samples ({wav.shape[0]/out_sr:.2f}s) -> {out}")
 
 
 if __name__ == "__main__":

@@ -4,11 +4,11 @@ Reads a metadata CSV (default LJSpeech: ``id|transcription|normalized_transcript
 pipe-delimited, no header, wavs under a ``wavs/`` dir) and yields, per clip, the
 audio resampled to *both* sample rates needed downstream:
 
-  - 24 kHz for SNAC audio tokenization,
+  - ``codec_sr`` for audio tokenization (24 kHz for SNAC, 16 kHz for NeuCodec),
   - 16 kHz for the speaker tokenizer.
 
 Audio is loaded once at native sample rate and resampled twice (no cropping —
-SNAC needs the full clip).
+the codec needs the full clip).
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from torch.utils.data import Dataset
 
 SPEAKER_SR = 16000
 SNAC_SR = 24000
+NEUCODEC_SR = 16000
 
 
 @dataclass
@@ -41,6 +42,8 @@ class CsvDatasetConfig:
     speaker_col: Optional[int] = None
     speaker_sr: int = SPEAKER_SR
     snac_sr: int = SNAC_SR
+    # Codec sample rate — set to NEUCODEC_SR (16000) when using NeuCodec.
+    codec_sr: Optional[int] = None  # None → use snac_sr for backward compat
 
 
 def _read_rows(cfg: CsvDatasetConfig) -> List[List[str]]:
@@ -73,11 +76,13 @@ def _resolve_text(cfg: CsvDatasetConfig, row: List[str]) -> str:
 
 
 class LJSpeechCsvDataset(Dataset):
-    """Each item: ``{wav_24k, wav_16k, text, speaker_id, wav_path}``."""
+    """Each item: ``{wav_codec, wav_16k, text, speaker_id, wav_path}``."""
 
     def __init__(self, cfg: CsvDatasetConfig):
         self.cfg = cfg
         self.rows = _read_rows(cfg)
+        # Effective codec SR: use explicit codec_sr if given, else snac_sr.
+        self._codec_sr = cfg.codec_sr if cfg.codec_sr is not None else cfg.snac_sr
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -98,9 +103,9 @@ class LJSpeechCsvDataset(Dataset):
             wav = wav.mean(dim=0, keepdim=True)
         wav = wav.squeeze(0)  # (T,)
 
-        wav_24k = (
-            torchaudio.functional.resample(wav, sr, cfg.snac_sr)
-            if sr != cfg.snac_sr
+        wav_codec = (
+            torchaudio.functional.resample(wav, sr, self._codec_sr)
+            if sr != self._codec_sr
             else wav
         )
         wav_16k = (
@@ -109,7 +114,7 @@ class LJSpeechCsvDataset(Dataset):
             else wav
         )
         return {
-            "wav_24k": wav_24k,
+            "wav_codec": wav_codec,
             "wav_16k": wav_16k,
             "text": text,
             "speaker_id": speaker_id,

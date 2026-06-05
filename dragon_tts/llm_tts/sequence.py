@@ -67,16 +67,29 @@ _SECTION_RE = re.compile(
 _TOKEN_RE = re.compile(r"<\|[^|]*\|>")
 
 
-def parse_sequence(seq: str) -> Dict[str, object]:
+def parse_sequence(
+    seq: str,
+    *,
+    codebook_size: int | None = None,
+    num_audio_tokens: int | None = None,
+) -> Dict[str, object]:
     """Inverse of :func:`build_sequence`.
 
     Returns ``{"spk_ids": List[int], "text": str, "audio_pairs": List[(slot,value)]}``.
+
+    Pass ``codebook_size`` and/or ``num_audio_tokens`` to match the codec in use
+    (defaults to SNAC constants for backward compatibility).
     """
     m = _SECTION_RE.search(seq)
     if m is None:
         raise ValueError("sequence does not match the expected LLM-TTS format")
     spk_ids = [parse_spk_token(t) for t in _TOKEN_RE.findall(m.group("spk"))]
+    parse_kw: dict = {}
+    if codebook_size is not None:
+        parse_kw["codebook_size"] = codebook_size
+    if num_audio_tokens is not None:
+        parse_kw["num_audio_tokens"] = num_audio_tokens
     audio_pairs: List[Tuple[int, int]] = [
-        parse_audio_token(t) for t in _TOKEN_RE.findall(m.group("audio"))
+        parse_audio_token(t, **parse_kw) for t in _TOKEN_RE.findall(m.group("audio"))
     ]
     return {"spk_ids": spk_ids, "text": m.group("text"), "audio_pairs": audio_pairs}

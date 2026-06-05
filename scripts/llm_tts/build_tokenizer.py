@@ -1,12 +1,21 @@
 """Create and save the extended Qwen3 tokenizer (+ optionally a resized model).
 
-Adds all LLM-TTS special tokens (structural + 4096 speaker + 28672 SNAC audio)
-to the base tokenizer and resizes the base model's embeddings to match, so the
-saved tokenizer/model can be used directly for training and inference.
+Adds all LLM-TTS special tokens (structural + speaker + audio) to the base
+tokenizer and resizes the base model's embeddings to match, so the saved
+tokenizer/model can be used directly for training and inference.
+
+The audio token count depends on the chosen codec:
+  - SNAC:     7 + 4096 + 28672 = 32775
+  - NeuCodec: 7 + 4096 + 65536 = 69639
 
 Usage:
     PYTHONPATH=. python scripts/llm_tts/build_tokenizer.py --config-name base \
         tokenizer.out_dir=./ckpts/llm_tts_tokenizer
+
+    # NeuCodec tokenizer:
+    PYTHONPATH=. python scripts/llm_tts/build_tokenizer.py --config-name base \
+        codec=neucodec tokenizer.out_dir=./ckpts/llm_tts_tokenizer_neucodec
+
     # also save a resized base model:
     PYTHONPATH=. python scripts/llm_tts/build_tokenizer.py --config-name base \
         tokenizer.out_dir=./ckpts/llm_tts_qwen3 tokenizer.save_model=true
@@ -20,7 +29,20 @@ import hydra
 import torch
 from omegaconf import DictConfig
 
-from dragon_tts.llm_tts.vocab import all_added_tokens, build_extended_tokenizer
+from dragon_tts.llm_tts.vocab import (
+    CodecType,
+    all_added_tokens,
+    build_extended_tokenizer,
+)
+
+
+def _resolve_codec_type(cfg: DictConfig) -> CodecType | None:
+    """Map the config ``codec`` string to a :class:`CodecType`."""
+    name = cfg.get("codec", "snac")
+    try:
+        return CodecType(name)
+    except ValueError:
+        return None  # defaults to SNAC in vocab helpers
 
 
 def _mean_init_new_rows(model, n_added: int) -> None:
@@ -48,10 +70,14 @@ def main(cfg: DictConfig) -> None:
     out_dir = Path(cfg.tokenizer.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tok = build_extended_tokenizer(base_model)
+    codec_type = _resolve_codec_type(cfg)
+    tok = build_extended_tokenizer(base_model, codec_type=codec_type)
     tok.save_pretrained(str(out_dir))
-    n_added = len(all_added_tokens())
-    print(f"[tokenizer] base={base_model}  vocab_size={len(tok)}  added={n_added}")
+    n_added = len(all_added_tokens(codec_type))
+    print(
+        f"[tokenizer] base={base_model}  codec={codec_type}  "
+        f"vocab_size={len(tok)}  added={n_added}"
+    )
     print(f"[tokenizer] saved to {out_dir}")
 
     if cfg.tokenizer.get("save_model", False):

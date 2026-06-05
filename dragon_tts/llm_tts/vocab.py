@@ -7,16 +7,21 @@ LLM tokenizer as *special* (non-splittable) tokens:
 2. **Speaker tokens (4096):** ``<|spk_v|>`` for v in 0..4095 — one per FSQ
    codebook entry of the speaker tokenizer (codebook_size=4096,
    num_quantizers=1). The 32 positions are emitted in sequence order.
-3. **SNAC audio tokens (7*4096 = 28672):** ``<|audio_id|>`` where
-   ``id = slot*4096 + value`` for ``slot`` in 0..6 (the per-frame position,
-   following Orpheus's layout) and ``value`` in 0..4095 (the SNAC code). Baking
-   the slot into the id makes decoding unambiguous.
+3. **Audio tokens:** ``<|audio_id|>`` where ``id = slot*codebook_size + value``.
+   The exact token count depends on the codec:
 
-All offset math lives here so encode (``snac_codec``) and decode stay in sync.
+   - **SNAC** (default): 7 slots × 4096 codebook = 28672 tokens.
+   - **NeuCodec**: 1 slot × 65536 codebook = 65536 tokens.
+
+   Baking the slot into the id makes decoding unambiguous.
+
+All offset math lives here so encode (``snac_codec`` / ``neucodec_codec``) and
+decode stay in sync.
 """
 
 from __future__ import annotations
 
+import enum
 import re
 from typing import List, Tuple
 
@@ -39,16 +44,40 @@ STRUCTURAL_TOKENS: List[str] = [
     END_AUDIO,
 ]
 
+# --- codec type --------------------------------------------------------------
+class CodecType(enum.Enum):
+    SNAC = "snac"
+    NEUCODEC = "neucodec"
+
+
 # --- sizes -------------------------------------------------------------------
 # Speaker tokenizer: ResidualFSQ codebook_size = 4^6 = 4096, num_quantizers = 1.
 SPK_CODEBOOK_SIZE = 4096
+
 # SNAC: 3 RVQ levels flattened to 7 tokens per frame; each code is 0..4095.
 SNAC_SLOTS = 7
 SNAC_CODEBOOK_SIZE = 4096
-NUM_AUDIO_TOKENS = SNAC_SLOTS * SNAC_CODEBOOK_SIZE  # 28672
+NUM_AUDIO_TOKENS_SNAC = SNAC_SLOTS * SNAC_CODEBOOK_SIZE  # 28672
+
+# NeuCodec: FSQ with 1 token per frame; each code is 0..65535.
+NEUCODEC_SLOTS = 1
+NEUCODEC_CODEBOOK_SIZE = 65536
+NUM_AUDIO_TOKENS_NEUCODEC = NEUCODEC_SLOTS * NEUCODEC_CODEBOOK_SIZE  # 65536
+
+# Backward compatibility: default to SNAC.
+NUM_AUDIO_TOKENS = NUM_AUDIO_TOKENS_SNAC
 
 _SPK_RE = re.compile(r"^<\|spk_(\d+)\|>$")
 _AUDIO_RE = re.compile(r"^<\|audio_(\d+)\|>$")
+
+
+def _codec_params(codec_type: CodecType | None = None) -> tuple[int, int, int]:
+    """Return (slots, codebook_size, num_audio_tokens) for a codec type."""
+    if codec_type is None or codec_type == CodecType.SNAC:
+        return SNAC_SLOTS, SNAC_CODEBOOK_SIZE, NUM_AUDIO_TOKENS_SNAC
+    elif codec_type == CodecType.NEUCODEC:
+        return NEUCODEC_SLOTS, NEUCODEC_CODEBOOK_SIZE, NUM_AUDIO_TOKENS_NEUCODEC
+    raise ValueError(f"unknown codec type: {codec_type}")
 
 
 # --- speaker tokens ----------------------------------------------------------
@@ -66,40 +95,68 @@ def parse_spk_token(token: str) -> int:
     return int(m.group(1))
 
 
-# --- audio (SNAC) tokens -----------------------------------------------------
-def audio_token(slot: int, value: int) -> str:
-    """``<|audio_id|>`` with ``id = slot*4096 + value``.
+# --- audio tokens (codec-generic) --------------------------------------------
+def audio_token(
+    slot: int,
+    value: int,
+    *,
+    slots: int | None = None,
+    codebook_size: int | None = None,
+) -> str:
+    """``<|audio_id|>`` with ``id = slot*codebook_size + value``.
 
-    ``slot`` is the per-frame position (0..6), ``value`` the SNAC code (0..4095).
+    When ``slots`` / ``codebook_size`` are not given, defaults to SNAC constants
+    for backward compatibility.
     """
-    if not 0 <= slot < SNAC_SLOTS:
-        raise ValueError(f"slot {slot} out of range [0,{SNAC_SLOTS})")
-    if not 0 <= value < SNAC_CODEBOOK_SIZE:
-        raise ValueError(f"value {value} out of range [0,{SNAC_CODEBOOK_SIZE})")
-    return f"<|audio_{slot * SNAC_CODEBOOK_SIZE + value}|>"
+    _slots = slots if slots is not None else SNAC_SLOTS
+    _cb = codebook_size if codebook_size is not None else SNAC_CODEBOOK_SIZE
+    if not 0 <= slot < _slots:
+        raise ValueError(f"slot {slot} out of range [0,{_slots})")
+    if not 0 <= value < _cb:
+        raise ValueError(f"value {value} out of range [0,{_cb})")
+    return f"<|audio_{slot * _cb + value}|>"
 
 
-def parse_audio_token(token: str) -> Tuple[int, int]:
-    """Inverse of :func:`audio_token` → ``(slot, value)``."""
+def parse_audio_token(
+    token: str,
+    *,
+    codebook_size: int | None = None,
+    num_audio_tokens: int | None = None,
+) -> Tuple[int, int]:
+    """Inverse of :func:`audio_token` → ``(slot, value)``.
+
+    When ``codebook_size`` / ``num_audio_tokens`` are not given, defaults to
+    SNAC constants for backward compatibility.
+    """
+    _cb = codebook_size if codebook_size is not None else SNAC_CODEBOOK_SIZE
+    _nat = num_audio_tokens if num_audio_tokens is not None else (_cb * SNAC_SLOTS)
     m = _AUDIO_RE.match(token.strip())
     if m is None:
         raise ValueError(f"not an audio token: {token!r}")
     flat = int(m.group(1))
-    if not 0 <= flat < NUM_AUDIO_TOKENS:
-        raise ValueError(f"audio id {flat} out of range [0,{NUM_AUDIO_TOKENS})")
-    return flat // SNAC_CODEBOOK_SIZE, flat % SNAC_CODEBOOK_SIZE
+    if not 0 <= flat < _nat:
+        raise ValueError(f"audio id {flat} out of range [0,{_nat})")
+    return flat // _cb, flat % _cb
 
 
 # --- full vocab + tokenizer --------------------------------------------------
-def all_added_tokens() -> List[str]:
-    """Every new token the base tokenizer must learn (~32,775 tokens)."""
+def all_added_tokens(codec_type: CodecType | None = None) -> List[str]:
+    """Every new token the base tokenizer must learn.
+
+    - SNAC: 7 + 4096 + 28672 = 32775 tokens
+    - NeuCodec: 7 + 4096 + 65536 = 69639 tokens
+    """
+    _, _, num_audio = _codec_params(codec_type)
     tokens = list(STRUCTURAL_TOKENS)
     tokens += [f"<|spk_{v}|>" for v in range(SPK_CODEBOOK_SIZE)]
-    tokens += [f"<|audio_{i}|>" for i in range(NUM_AUDIO_TOKENS)]
+    tokens += [f"<|audio_{i}|>" for i in range(num_audio)]
     return tokens
 
 
-def build_extended_tokenizer(base_model: str = "Qwen/Qwen3-0.6B"):
+def build_extended_tokenizer(
+    base_model: str = "Qwen/Qwen3-0.6B",
+    codec_type: CodecType | None = None,
+):
     """Load the base tokenizer and add all LLM-TTS special tokens.
 
     Returns the extended tokenizer. The model's input/output embeddings must be
@@ -108,5 +165,7 @@ def build_extended_tokenizer(base_model: str = "Qwen/Qwen3-0.6B"):
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(base_model)
-    tok.add_special_tokens({"additional_special_tokens": all_added_tokens()})
+    tok.add_special_tokens(
+        {"additional_special_tokens": all_added_tokens(codec_type)}
+    )
     return tok

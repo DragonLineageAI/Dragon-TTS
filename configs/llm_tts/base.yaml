@@ -11,7 +11,9 @@ defaults:
 
 # --- shared ---
 base_model: Qwen/Qwen3-0.6B
+codec: snac                    # "snac" or "neucodec"
 snac_model: hubertsiuzdak/snac_24khz
+neucodec_model: neuphonic/neucodec
 device: cuda
 # Trained speaker-tokenizer Lightning checkpoint (required for data build + inference).
 speaker_ckpt: ???

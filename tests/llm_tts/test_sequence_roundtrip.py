@@ -22,7 +22,7 @@ def test_audio_token_ids_are_unique_and_contiguous():
         for value in range(vocab.SNAC_CODEBOOK_SIZE):
             flat = int(vocab.audio_token(slot, value)[len("<|audio_") : -2])
             seen.add(flat)
-    assert seen == set(range(vocab.NUM_AUDIO_TOKENS))
+    assert seen == set(range(vocab.NUM_AUDIO_TOKENS_SNAC))
 
 
 def test_spk_token_roundtrip():
@@ -33,7 +33,7 @@ def test_spk_token_roundtrip():
 def test_token_count():
     toks = vocab.all_added_tokens()
     assert len(toks) == len(set(toks))  # no duplicates
-    assert len(toks) == 7 + vocab.SPK_CODEBOOK_SIZE + vocab.NUM_AUDIO_TOKENS
+    assert len(toks) == 7 + vocab.SPK_CODEBOOK_SIZE + vocab.NUM_AUDIO_TOKENS_SNAC
 
 
 def test_out_of_range_raises():
@@ -67,3 +67,58 @@ def test_prompt_is_sequence_prefix():
     seq = build_sequence(spk_ids, text, [vocab.audio_token(0, 0)])
     assert seq.startswith(prompt)
     assert prompt.endswith(vocab.START_AUDIO)
+
+
+# --- NeuCodec-specific tests -------------------------------------------------
+
+def test_neucodec_audio_token_roundtrip():
+    """NeuCodec: slot=0, codebook_size=65536."""
+    cb = vocab.NEUCODEC_CODEBOOK_SIZE
+    for value in (0, 1, 100, 32767, 65535):
+        tok = vocab.audio_token(0, value, slots=1, codebook_size=cb)
+        slot, val = vocab.parse_audio_token(tok, codebook_size=cb, num_audio_tokens=cb)
+        assert slot == 0
+        assert val == value
+
+
+def test_neucodec_token_count():
+    toks = vocab.all_added_tokens(vocab.CodecType.NEUCODEC)
+    assert len(toks) == len(set(toks))  # no duplicates
+    expected = 7 + vocab.SPK_CODEBOOK_SIZE + vocab.NUM_AUDIO_TOKENS_NEUCODEC
+    assert len(toks) == expected
+    assert expected == 7 + 4096 + 65536  # = 69639
+
+
+def test_neucodec_out_of_range_raises():
+    cb = vocab.NEUCODEC_CODEBOOK_SIZE
+    with pytest.raises(ValueError):
+        vocab.audio_token(1, 0, slots=1, codebook_size=cb)  # slot 1 invalid
+    with pytest.raises(ValueError):
+        vocab.audio_token(0, 65536, slots=1, codebook_size=cb)  # value out of range
+
+
+def test_neucodec_sequence_roundtrip():
+    """Build + parse a sequence using NeuCodec tokens."""
+    spk_ids = [0, 5, 4095]
+    text = "Xin chào!"
+    cb = vocab.NEUCODEC_CODEBOOK_SIZE
+    audio_tokens = [
+        vocab.audio_token(0, v, slots=1, codebook_size=cb)
+        for v in [0, 100, 65535, 32768, 1234]
+    ]
+    seq = build_sequence(spk_ids, text, audio_tokens)
+    parsed = parse_sequence(seq, codebook_size=cb, num_audio_tokens=cb)
+    assert parsed["spk_ids"] == spk_ids
+    assert parsed["text"] == text
+    expected_pairs = [
+        vocab.parse_audio_token(t, codebook_size=cb, num_audio_tokens=cb)
+        for t in audio_tokens
+    ]
+    assert parsed["audio_pairs"] == expected_pairs
+
+
+def test_codec_type_enum():
+    assert vocab.CodecType.SNAC.value == "snac"
+    assert vocab.CodecType.NEUCODEC.value == "neucodec"
+    assert vocab.CodecType("snac") == vocab.CodecType.SNAC
+    assert vocab.CodecType("neucodec") == vocab.CodecType.NEUCODEC

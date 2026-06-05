@@ -16,6 +16,7 @@ from typing import List, Sequence, Tuple
 
 import torch
 
+from dragon_tts.llm_tts.codec_base import AudioCodec
 from dragon_tts.llm_tts.vocab import (
     SNAC_SLOTS,
     audio_token,
@@ -26,8 +27,13 @@ SNAC_SAMPLE_RATE = 24000
 SNAC_MODEL_ID = "hubertsiuzdak/snac_24khz"
 
 
-class SnacCodec:
+class SnacCodec(AudioCodec):
     """Thin wrapper around the SNAC 24 kHz model."""
+
+    sample_rate: int = SNAC_SAMPLE_RATE
+    output_sample_rate: int = SNAC_SAMPLE_RATE
+    slots_per_frame: int = SNAC_SLOTS
+    codebook_size: int = 4096
 
     def __init__(self, device: str = "cuda", model_id: str = SNAC_MODEL_ID):
         from snac import SNAC  # lazy: heavy optional dependency

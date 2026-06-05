@@ -1,7 +1,9 @@
 """Public inference API for the Orpheus-style LLM-TTS (transformers backend).
 
-Pipeline: reference clip -> speaker tokens, build prompt, LLM generates the SNAC
-audio-token stream, SNAC decodes it back to a 24 kHz waveform.
+Pipeline: reference clip -> speaker tokens, build prompt, LLM generates the
+audio-token stream, codec decodes it back to a waveform.
+
+Supports both SNAC (default) and NeuCodec codecs.
 """
 
 from __future__ import annotations
@@ -12,8 +14,8 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torchaudio
 
+from dragon_tts.llm_tts.codec_base import AudioCodec
 from dragon_tts.llm_tts.sequence import build_prompt
-from dragon_tts.llm_tts.snac_codec import SnacCodec
 from dragon_tts.llm_tts.vocab import END_AUDIO, parse_audio_token
 from dragon_tts.speaker_tokenizer.inference.api import SpeakerTokenizerPipeline
 
@@ -22,15 +24,35 @@ AudioInput = Union[str, Path, torch.Tensor]
 SPEAKER_SR = 16000
 
 
+def _build_codec(
+    codec_name: str, device: str, snac_model: str | None, neucodec_model: str | None
+) -> AudioCodec:
+    """Instantiate the configured audio codec."""
+    if codec_name == "neucodec":
+        from dragon_tts.llm_tts.neucodec_codec import NeucodecCodec
+
+        return NeucodecCodec(
+            device=device, model_id=neucodec_model or "neuphonic/neucodec"
+        )
+    else:
+        from dragon_tts.llm_tts.snac_codec import SnacCodec
+
+        return SnacCodec(
+            device=device, model_id=snac_model or "hubertsiuzdak/snac_24khz"
+        )
+
+
 class OrpheusTTSPipeline:
-    """Load the fine-tuned Qwen3 LLM + extended tokenizer + SNAC + speaker tok."""
+    """Load the fine-tuned Qwen3 LLM + extended tokenizer + codec + speaker tok."""
 
     def __init__(
         self,
         model_dir: Union[str, Path],
         speaker_ckpt: Union[str, Path],
         device: str = "cuda",
+        codec: str = "snac",
         snac_model: Optional[str] = None,
+        neucodec_model: Optional[str] = None,
         speaker_crop_seconds: float = 4.0,
         dtype: torch.dtype = torch.bfloat16,
     ):
@@ -43,7 +65,7 @@ class OrpheusTTSPipeline:
             .to(self.device)
             .eval()
         )
-        self.snac = SnacCodec(device=device, model_id=snac_model or "hubertsiuzdak/snac_24khz")
+        self.codec: AudioCodec = _build_codec(codec, device, snac_model, neucodec_model)
         self.speaker = SpeakerTokenizerPipeline(str(speaker_ckpt), device=device)
         self.speaker_crop = int(speaker_crop_seconds * SPEAKER_SR)
         self.end_audio_id = self.tokenizer.convert_tokens_to_ids(END_AUDIO)
@@ -85,7 +107,7 @@ class OrpheusTTSPipeline:
         top_p: float = 0.95,
         repetition_penalty: float = 1.1,
     ) -> torch.Tensor:
-        """Generate a 24 kHz waveform for ``text`` in the voice of ``ref_audio``."""
+        """Generate a waveform for ``text`` in the voice of ``ref_audio``."""
         spk_ids = self.speaker_tokens(ref_audio)
         prompt = build_prompt(spk_ids, text)
         input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
@@ -102,16 +124,20 @@ class OrpheusTTSPipeline:
         )
         gen_ids = out[0, input_ids.shape[1] :].tolist()
         pairs = self._ids_to_audio_pairs(gen_ids)
-        return self.snac.decode_pairs(pairs)
+        return self.codec.decode_pairs(pairs)
 
     def _ids_to_audio_pairs(self, gen_ids: List[int]) -> List[Tuple[int, int]]:
         tokens = self.tokenizer.convert_ids_to_tokens(gen_ids)
+        cb = self.codec.codebook_size
+        nat = self.codec.num_audio_tokens
         pairs: List[Tuple[int, int]] = []
         for t in tokens:
             if t == END_AUDIO:
                 break
             try:
-                pairs.append(parse_audio_token(t))
+                pairs.append(
+                    parse_audio_token(t, codebook_size=cb, num_audio_tokens=nat)
+                )
             except ValueError:
                 continue  # skip stray non-audio tokens
         return pairs
