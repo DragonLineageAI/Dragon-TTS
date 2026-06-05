@@ -1,0 +1,24 @@
+# ReDimNet speaker-tokenizer config (IDRnD/ReDimNet encoder).
+# Inherits everything from base.yaml and swaps the encoder to ReDimNet.
+# Usage:
+#   python scripts/speaker_tokenizer/train.py --config-name redimnet \
+#       data.manifest=/path/train.jsonl
+# No separate checkpoint needed — weights load via torch.hub.
+#
+# The reconstruction target is ReDimNet's native 192-d speaker embedding;
+# context_dim (C*F, typically 1728 for model M) and out_dim (192) are derived
+# from the backbone, so no other model hyperparameters need changing.
+# The dataset emits raw 16 kHz waveform (input_kind derived from encoder.type).
+
+defaults:
+  - base
+  - _self_
+
+model:
+  encoder:
+    type: redimnet
+    model_name: M               # b0–b6 or M
+    train_type: ft_mix           # ptn, ft_lm, ft_mix
+    dataset: vb2+vox2+cnc        # vox2, vb2+vox2+cnc, etc.
+    freeze: true
+    ckpt: null                   # no separate checkpoint; weights from torch.hub

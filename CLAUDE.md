@@ -84,11 +84,16 @@ Manifest is JSONL, one object per line: `{"wav_path": "...", "speaker_id": "..."
 
 **Indices shape gotcha.** Because `ResidualFSQ(is_channel_first=True)`, model output `indices` has shape `(B, num_quantizers, token_num)` — **not** `(B, token_num, num_quantizers)`. This matches SparkVox's `SpeakerEncoder` and is the convention `lit_module.py` and `sanity_check.py` index by. `detokenize` performs the necessary `transpose(1, 2)` internally; do not change this without auditing both callers.
 
+**The speaker backbone is selectable via the `encoder` config block (see `dragon_tts/speaker_tokenizer/backbones.py`):**
+  - `ecapa` — frozen ECAPA-TDNN on LINEAR mel (the original design).
+  - `wavlm` — frozen `microsoft/wavlm-base-plus-sv` on raw 16 kHz waveform.
+  - `redimnet` — frozen ReDimNet (`IDRnD/ReDimNet`) on raw 16 kHz waveform, loaded via `torch.hub`; embed_dim=192, context_dim=C×F (1728 for model M).
+
 **Mel config must match ECAPA training config.** `dragon_tts/speaker_tokenizer/data/mel.py` (`MelSpectrogramFeature`) reproduces the Spark-TTS-0.5B BiCodec settings (see `checkpoints/Spark-TTS-0.5B/BiCodec/config.yaml`): **16 kHz** / n_fft=1024 / win=640 / hop=320 / 128 mels / f_min=10 / slaney norm + slaney scale / **linear mel (power=1, NO log)**. The frozen ECAPA was trained on linear mel, so feeding log-mel or the wrong sample rate pushes ECAPA's frozen BatchNorms out of distribution and the `x_vector` magnitude explodes (norm ~1e6) → MSE in the 1e10 range and no learning. With the correct features `x_vector` norm is ~30 and MSE starts ~1.0. Verify against the source config when loading a new checkpoint.
 
 **Vendored from SparkVox.** Five files under `dragon_tts/modules/{ecapa,fsq,perceiver_encoder.py}` are direct copies from SparkVox with Apache-2.0 headers preserved and imports relativized. See `NOTICE`. When updating vendored files, preserve the upstream behavior — including a latent bug in `residual_fsq.py:round_up_multiple` (references unimported `ceil`, never reached because `quantize_dropout_multiple_of=1` is the default and we never enable `quantize_dropout`).
 
-**Default hyperparameters** (used by `SpeakerTokenizer` and `configs/speaker_tokenizer/base.yaml`): `input_dim=128`, `out_dim=1024`, `latent_dim=128`, `token_num=32`, `fsq_levels=[4]*6` (codebook_size = 4⁶ = 4096), `fsq_num_quantizers=1`, ECAPA channels=512 (hard-coded — context dim 1536 for PerceiverResampler depends on this).
+**Default hyperparameters** (used by `SpeakerTokenizer` and `configs/speaker_tokenizer/base.yaml`): `input_dim=128`, `out_dim=1024`, `latent_dim=128`, `token_num=32`, `fsq_levels=[4]*6` (codebook_size = 4⁶ = 4096), `fsq_num_quantizers=1`, ECAPA channels=512 (hard-coded — context dim 1536 for PerceiverResampler depends on this). WavLM: context_dim=768, embed_dim=512. ReDimNet: context_dim=C×F (1728 for model M), embed_dim=192.
 
 ## When debugging training
 

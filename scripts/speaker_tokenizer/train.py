@@ -36,7 +36,7 @@ def main(cfg: DictConfig) -> None:
 
     # ecapa → mel features; wavlm → raw waveform.
     encoder_type = cfg.model.encoder.type
-    input_kind = "waveform" if encoder_type == "wavlm" else "mel"
+    input_kind = "waveform" if encoder_type in ("wavlm", "redimnet") else "mel"
 
     dm = SpeakerDataModule(
         manifest=cfg.data.manifest,

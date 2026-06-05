@@ -92,6 +92,78 @@ class EcapaBackbone(SpeakerBackbone):
         return x_vector, features
 
 
+class ReDimNetBackbone(SpeakerBackbone):
+    """Frozen ReDimNet (IDRnD/ReDimNet) on raw 16 kHz waveform.
+
+    Loads a pretrained ``ReDimNetWrap`` via ``torch.hub`` and splits its
+    forward into two parts:
+
+    1. ``spec → backbone(return_all_outputs=True)`` → frame-level 1D features
+       ``(B, C*F, T)`` used as PerceiverResampler context.
+    2. ``pool → bn → linear`` → 192-d pooled speaker embedding used as the
+       reconstruction target (``x_vector``).
+
+    Available model variants: b0–b6, M.  See
+    https://github.com/IDRnD/ReDimNet/blob/master/EVALUATION.md
+    """
+
+    input_kind = "waveform"
+
+    def __init__(
+        self,
+        model_name: str = "M",
+        train_type: str = "ft_mix",
+        dataset: str = "vb2+vox2+cnc",
+        freeze: bool = True,
+    ):
+        super().__init__()
+        self.model = torch.hub.load(
+            "IDRnD/ReDimNet",
+            "ReDimNet",
+            model_name=model_name,
+            train_type=train_type,
+            dataset=dataset,
+        )
+        # Enable frame-level output from the backbone.
+        self.model.backbone.return_all_outputs = True
+        self.model.return_all_outputs = True
+
+        # Derive dims from the loaded model config.
+        self._context_dim = int(self.model.backbone.C * self.model.backbone.F)
+        self._embed_dim = int(self.model.linear.out_features)  # 192
+        self._freeze = freeze
+
+    @property
+    def context_dim(self) -> int:
+        return self._context_dim
+
+    @property
+    def embed_dim(self) -> int:
+        return self._embed_dim
+
+    def forward(self, wav: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if wav.dim() == 1:
+            wav = wav.unsqueeze(0)
+
+        # Step 1: Mel-spectrogram (internal to ReDimNet, NOT the ECAPA mel).
+        spec = self.model.spec(wav)
+        if spec.ndim == 3:
+            spec = spec.unsqueeze(1)
+
+        # Step 2: Backbone → frame-level features.
+        backbone_out, _all_outs = self.model.backbone(spec)
+        features = backbone_out  # (B, C*F, T)
+
+        # Step 3: Pool → BN → Linear → x_vector.
+        x_vector = self.model.linear(self.model.bn(self.model.pool(backbone_out)))
+        if self.model.bn2 is not None and not isinstance(
+            self.model.bn2, torch.nn.Identity
+        ):
+            x_vector = self.model.bn2(x_vector)
+
+        return x_vector, features
+
+
 class WavLMBackbone(SpeakerBackbone):
     """Frozen ``WavLMForXVector`` (microsoft/wavlm-base-plus-sv) on raw waveform.
 
@@ -150,8 +222,9 @@ class WavLMBackbone(SpeakerBackbone):
 def build_backbone(encoder_cfg: Dict[str, Any]) -> SpeakerBackbone:
     """Construct a backbone from a config dict with a ``type`` key.
 
-    ``type="ecapa"``  → ``EcapaBackbone(feat_dim, embed_dim, channels)``
-    ``type="wavlm"``  → ``WavLMBackbone(pretrained, do_normalize, freeze)``
+    ``type="ecapa"``    → ``EcapaBackbone(feat_dim, embed_dim, channels)``
+    ``type="wavlm"``    → ``WavLMBackbone(pretrained, do_normalize, freeze)``
+    ``type="redimnet"`` → ``ReDimNetBackbone(model_name, train_type, dataset, freeze)``
 
     Extra keys not consumed by the backbone (e.g. ``ckpt``) are ignored here;
     the SpeakerTokenizer / LightningModule handle checkpoint loading.
@@ -170,4 +243,14 @@ def build_backbone(encoder_cfg: Dict[str, Any]) -> SpeakerBackbone:
             do_normalize=cfg.get("do_normalize", True),
             freeze=cfg.get("freeze", True),
         )
-    raise ValueError(f"Unknown encoder type: {enc_type!r} (expected 'ecapa' or 'wavlm')")
+    if enc_type == "redimnet":
+        return ReDimNetBackbone(
+            model_name=cfg.get("model_name", "M"),
+            train_type=cfg.get("train_type", "ft_mix"),
+            dataset=cfg.get("dataset", "vb2+vox2+cnc"),
+            freeze=cfg.get("freeze", True),
+        )
+    raise ValueError(
+        f"Unknown encoder type: {enc_type!r} (expected 'ecapa', 'wavlm', or 'redimnet')"
+    )
+
