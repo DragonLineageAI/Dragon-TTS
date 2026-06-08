@@ -58,11 +58,11 @@ class NeucodecCodec(AudioCodec):
 
         # encode_code returns (B, 1, N) where N = number of frames
         fsq_codes = self.model.encode_code(wav)  # (1, 1, N)
-        codes = fsq_codes[0, 0]  # (N,)
+        codes_list = fsq_codes[0, 0].cpu().tolist()  # single CUDA→CPU bulk transfer
 
         tokens: List[str] = []
-        for i in range(codes.shape[0]):
-            tokens.append(audio_token(0, int(codes[i]), codebook_size=self.codebook_size))
+        for v in codes_list:
+            tokens.append(audio_token(0, v, codebook_size=self.codebook_size))
         return tokens
 
     @torch.no_grad()
@@ -102,15 +102,18 @@ class NeucodecCodec(AudioCodec):
         max_frames = fsq_codes.shape[2]
 
         # -- per-sample: truncate to valid frames & flatten ---------------------
+        # Single bulk CUDA→CPU transfer for the entire batch
+        all_codes = fsq_codes[:, 0, :].cpu().tolist()  # (B, N) → nested list
+
         results: List[List[str]] = []
         for b in range(len(wavs_16k)):
             n_frames = min(int(orig_lengths[b] / self._hop), max_frames)
-            codes = fsq_codes[b, 0]  # (N,)
+            codes_list = all_codes[b]
 
             tokens: List[str] = []
             for i in range(n_frames):
                 tokens.append(
-                    audio_token(0, int(codes[i]), codebook_size=self.codebook_size)
+                    audio_token(0, codes_list[i], codebook_size=self.codebook_size)
                 )
             results.append(tokens)
 

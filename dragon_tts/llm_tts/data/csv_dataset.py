@@ -110,9 +110,13 @@ class LJSpeechCsvDataset(Dataset):
             else wav
         )
         wav_16k = (
-            torchaudio.functional.resample(wav, sr, cfg.speaker_sr)
-            if sr != cfg.speaker_sr
-            else wav
+            wav_codec
+            if self._codec_sr == cfg.speaker_sr
+            else (
+                torchaudio.functional.resample(wav, sr, cfg.speaker_sr)
+                if sr != cfg.speaker_sr
+                else wav
+            )
         )
         return {
             "wav_codec": wav_codec,

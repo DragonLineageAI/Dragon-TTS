@@ -60,17 +60,19 @@ class SnacCodec(AudioCodec):
         wav = wav.to(self.device)
 
         codes = self.model.encode(wav)  # list of (1, n0), (1, n1), (1, n2)
-        c0, c1, c2 = codes[0][0], codes[1][0], codes[2][0]
+        c0 = codes[0][0].cpu().tolist()
+        c1 = codes[1][0].cpu().tolist()
+        c2 = codes[2][0].cpu().tolist()
 
         tokens: List[str] = []
-        for i in range(c0.shape[0]):
-            tokens.append(audio_token(0, int(c0[i])))
-            tokens.append(audio_token(1, int(c1[2 * i])))
-            tokens.append(audio_token(2, int(c2[4 * i])))
-            tokens.append(audio_token(3, int(c2[4 * i + 1])))
-            tokens.append(audio_token(4, int(c1[2 * i + 1])))
-            tokens.append(audio_token(5, int(c2[4 * i + 2])))
-            tokens.append(audio_token(6, int(c2[4 * i + 3])))
+        for i in range(len(c0)):
+            tokens.append(audio_token(0, c0[i]))
+            tokens.append(audio_token(1, c1[2 * i]))
+            tokens.append(audio_token(2, c2[4 * i]))
+            tokens.append(audio_token(3, c2[4 * i + 1]))
+            tokens.append(audio_token(4, c1[2 * i + 1]))
+            tokens.append(audio_token(5, c2[4 * i + 2]))
+            tokens.append(audio_token(6, c2[4 * i + 3]))
         return tokens
 
     @torch.no_grad()
@@ -110,22 +112,27 @@ class SnacCodec(AudioCodec):
         max_frames = codes[0].shape[1]  # frames for the padded length
 
         # -- per-sample: truncate to valid frames & flatten ---------------------
+        # Single bulk CUDA→CPU transfer for the entire batch
+        c0_all = codes[0].cpu().tolist()  # (B, n0)
+        c1_all = codes[1].cpu().tolist()  # (B, n1)
+        c2_all = codes[2].cpu().tolist()  # (B, n2)
+
         results: List[List[str]] = []
         for b in range(len(wavs_24k)):
             n_frames = min(int(orig_lengths[b] / self._hop), max_frames)
-            c0 = codes[0][b]  # (n0,)
-            c1 = codes[1][b]  # (n1 = 2*n0,)
-            c2 = codes[2][b]  # (n2 = 4*n0,)
+            c0 = c0_all[b]
+            c1 = c1_all[b]
+            c2 = c2_all[b]
 
             tokens: List[str] = []
             for i in range(n_frames):
-                tokens.append(audio_token(0, int(c0[i])))
-                tokens.append(audio_token(1, int(c1[2 * i])))
-                tokens.append(audio_token(2, int(c2[4 * i])))
-                tokens.append(audio_token(3, int(c2[4 * i + 1])))
-                tokens.append(audio_token(4, int(c1[2 * i + 1])))
-                tokens.append(audio_token(5, int(c2[4 * i + 2])))
-                tokens.append(audio_token(6, int(c2[4 * i + 3])))
+                tokens.append(audio_token(0, c0[i]))
+                tokens.append(audio_token(1, c1[2 * i]))
+                tokens.append(audio_token(2, c2[4 * i]))
+                tokens.append(audio_token(3, c2[4 * i + 1]))
+                tokens.append(audio_token(4, c1[2 * i + 1]))
+                tokens.append(audio_token(5, c2[4 * i + 2]))
+                tokens.append(audio_token(6, c2[4 * i + 3]))
             results.append(tokens)
 
         return results
