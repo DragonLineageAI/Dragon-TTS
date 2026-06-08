@@ -46,6 +46,12 @@ skip_empty_text: true
 limit: null              # cap number of examples (debug); null = all
 resume: false           # append + skip wav_paths already in <output>.done
 
+# --- build_training_data_from_jsonl.py ---
+# Input: JSONL with pre-computed codes + audio dir (for speaker tokenizer).
+jsonl_input: null        # e.g. /path/to/precomputed.jsonl
+audio_dir: null          # e.g. /path/to/wavs
+audio_ext: .wav          # audio file extension (.wav, .flac, …)
+
 # --- inference (infer.py / infer_vllm.py) ---
 model_dir: ???          # fine-tuned LLM + extended tokenizer directory
 infer:
