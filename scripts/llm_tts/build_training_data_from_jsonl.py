@@ -116,6 +116,10 @@ def _fix_length(wav: torch.Tensor, target: int) -> torch.Tensor:
 class PrecomputedJsonlDataset(Dataset):
     """Read ``{audio_name, text, codes}`` from a JSONL and resolve audio paths.
 
+    Uses **byte-offset indexing** so the JSONL is *not* loaded into RAM.
+    Only the line offsets (a list of ints) are kept in memory; each
+    ``__getitem__`` seeks to the relevant offset and parses a single line.
+
     Each item yields:
       - ``wav_16k``: 16 kHz mono waveform for the speaker tokenizer.
       - ``text``: transcription string.
@@ -129,19 +133,31 @@ class PrecomputedJsonlDataset(Dataset):
         audio_dir: str,
         audio_ext: str = ".wav",
     ):
+        self.jsonl_path = jsonl_path
         self.audio_dir = Path(audio_dir)
         self.audio_ext = audio_ext
-        self.entries: List[Dict[str, Any]] = []
 
-        with open(jsonl_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
+        # Build byte-offset index — only stores one int per line.
+        self._offsets: List[int] = []
+        with open(jsonl_path, "rb") as f:
+            while True:
+                offset = f.tell()
+                line = f.readline()
                 if not line:
-                    continue
-                self.entries.append(json.loads(line))
+                    break
+                if line.strip():
+                    self._offsets.append(offset)
+
+        log.info("indexed %d entries from %s", len(self._offsets), jsonl_path)
 
     def __len__(self) -> int:
-        return len(self.entries)
+        return len(self._offsets)
+
+    def _read_entry(self, idx: int) -> Dict[str, Any]:
+        """Seek to ``idx``-th line and parse it."""
+        with open(self.jsonl_path, "rb") as f:
+            f.seek(self._offsets[idx])
+            return json.loads(f.readline())
 
     def _resolve_audio_path(self, audio_name: str) -> Path:
         name = (
@@ -152,7 +168,7 @@ class PrecomputedJsonlDataset(Dataset):
         return self.audio_dir / name
 
     def __getitem__(self, idx: int) -> Dict[str, Any] | None:
-        entry = self.entries[idx]
+        entry = self._read_entry(idx)
         audio_name = entry["audio_name"]
         text = entry.get("text", "")
         codes = entry["codes"]
