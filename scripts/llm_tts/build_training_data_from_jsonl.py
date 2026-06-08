@@ -51,7 +51,7 @@ import soundfile as sf
 import torch
 import torchaudio
 from omegaconf import DictConfig
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, IterableDataset
 from tqdm import tqdm
 
 from dragon_tts.llm_tts.sequence import build_sequence
@@ -110,21 +110,33 @@ def _fix_length(wav: torch.Tensor, target: int) -> torch.Tensor:
     return wav.repeat(reps)[:target]
 
 
+def _count_lines(path: str) -> int:
+    """Fast line count (binary, no JSON parsing) for tqdm total."""
+    count = 0
+    with open(path, "rb") as f:
+        for line in f:
+            if line.strip():
+                count += 1
+    return count
+
+
 # ── dataset ──────────────────────────────────────────────────────────────────
 
 
-class PrecomputedJsonlDataset(Dataset):
-    """Read ``{audio_name, text, codes}`` from a JSONL and resolve audio paths.
+class PrecomputedJsonlDataset(IterableDataset):
+    """Stream ``{audio_name, text, codes}`` from a JSONL line-by-line.
 
-    Uses **byte-offset indexing** so the JSONL is *not* loaded into RAM.
-    Only the line offsets (a list of ints) are kept in memory; each
-    ``__getitem__`` seeks to the relevant offset and parses a single line.
+    **No upfront loading or indexing** — the file is read sequentially and
+    each line is parsed on demand.  When ``num_workers > 0`` in the
+    DataLoader, lines are sharded across workers via round-robin so that
+    every line is processed exactly once.
 
-    Each item yields:
+    Each yielded item is a dict with:
       - ``wav_16k``: 16 kHz mono waveform for the speaker tokenizer.
       - ``text``: transcription string.
       - ``codes``: list of int (pre-computed codec codes).
       - ``audio_name``: identifier string.
+    Items whose audio file is missing or unreadable are silently skipped.
     """
 
     def __init__(
@@ -137,28 +149,6 @@ class PrecomputedJsonlDataset(Dataset):
         self.audio_dir = Path(audio_dir)
         self.audio_ext = audio_ext
 
-        # Build byte-offset index — only stores one int per line.
-        self._offsets: List[int] = []
-        with open(jsonl_path, "rb") as f:
-            while True:
-                offset = f.tell()
-                line = f.readline()
-                if not line:
-                    break
-                if line.strip():
-                    self._offsets.append(offset)
-
-        log.info("indexed %d entries from %s", len(self._offsets), jsonl_path)
-
-    def __len__(self) -> int:
-        return len(self._offsets)
-
-    def _read_entry(self, idx: int) -> Dict[str, Any]:
-        """Seek to ``idx``-th line and parse it."""
-        with open(self.jsonl_path, "rb") as f:
-            f.seek(self._offsets[idx])
-            return json.loads(f.readline())
-
     def _resolve_audio_path(self, audio_name: str) -> Path:
         name = (
             audio_name
@@ -167,8 +157,8 @@ class PrecomputedJsonlDataset(Dataset):
         )
         return self.audio_dir / name
 
-    def __getitem__(self, idx: int) -> Dict[str, Any] | None:
-        entry = self._read_entry(idx)
+    def _process_entry(self, entry: Dict[str, Any]) -> Dict[str, Any] | None:
+        """Load audio and return the item dict, or ``None`` on failure."""
         audio_name = entry["audio_name"]
         text = entry.get("text", "")
         codes = entry["codes"]
@@ -179,7 +169,6 @@ class PrecomputedJsonlDataset(Dataset):
             log.warning("audio not found, skipping: %s", audio_path)
             return None
 
-        # Load audio and resample to 16 kHz for the speaker tokenizer.
         try:
             data, sr = sf.read(str(audio_path), dtype="float32")
         except Exception as exc:
@@ -203,13 +192,29 @@ class PrecomputedJsonlDataset(Dataset):
             "audio_name": audio_name,
         }
 
+    def __iter__(self) -> Iterator[Dict[str, Any]]:
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info else 0
+        num_workers = worker_info.num_workers if worker_info else 1
 
-def _collate_keep_lists(batch: List[Dict[str, Any] | None]) -> Dict[str, Any]:
-    """Collate variable-length items by keeping per-field lists (no stacking).
+        with open(self.jsonl_path, "r", encoding="utf-8") as f:
+            for line_idx, raw_line in enumerate(f):
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
 
-    ``None`` items (e.g. missing audio) are silently filtered out.
-    """
-    batch = [b for b in batch if b is not None]
+                # Round-robin sharding across DataLoader workers.
+                if line_idx % num_workers != worker_id:
+                    continue
+
+                entry = json.loads(raw_line)
+                item = self._process_entry(entry)
+                if item is not None:
+                    yield item
+
+
+def _collate_keep_lists(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Collate variable-length items by keeping per-field lists (no stacking)."""
     if not batch:
         return {}
     return {k: [b[k] for b in batch] for k in batch[0]}
@@ -237,16 +242,21 @@ def main(cfg: DictConfig) -> None:
     slots_per_frame, codebook_size = _codec_params(codec_name)
 
     # -- dataset & loader ------------------------------------------------------
+    jsonl_path = str(cfg.jsonl_input)
     audio_ext = cfg.get("audio_ext", ".wav")
     dataset = PrecomputedJsonlDataset(
-        jsonl_path=str(cfg.jsonl_input),
+        jsonl_path=jsonl_path,
         audio_dir=str(cfg.audio_dir),
         audio_ext=audio_ext,
     )
+
+    # Fast line count for the progress bar (binary scan, no JSON parsing).
+    total_lines = _count_lines(jsonl_path)
+    total_batches = -(-total_lines // cfg.data.batch_size)  # ceil
+
     loader = DataLoader(
         dataset,
         batch_size=cfg.data.batch_size,
-        shuffle=False,
         num_workers=cfg.data.num_workers,
         collate_fn=_collate_keep_lists,
     )
@@ -270,16 +280,13 @@ def main(cfg: DictConfig) -> None:
     limit = cfg.get("limit", None)
     n_written = 0
     n_skipped = 0
-    n_missing = 0
     mode = "a" if resume else "w"
 
     with open(out_path, mode, encoding="utf-8") as out_f, open(
         done_path, "a" if resume else "w", encoding="utf-8"
     ) as done_f:
-        for batch in tqdm(loader, desc="build (pre-computed codes)"):
-            # Empty batch — all items were missing audio files.
+        for batch in tqdm(loader, desc="build (pre-computed codes)", total=total_batches):
             if not batch:
-                n_missing += 1
                 continue
 
             # --- speaker tokens (batched over a fixed-length crop) ---
@@ -315,8 +322,6 @@ def main(cfg: DictConfig) -> None:
                     )
                     return
 
-    if n_missing:
-        print(f"[warn] {n_missing} batches had all audio missing (see warnings above)")
     if n_skipped:
         print(f"[info] skipped {n_skipped} already-done entries")
     print(f"[done] wrote {n_written} examples to {out_path}")
