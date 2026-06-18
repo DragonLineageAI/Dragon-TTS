@@ -72,6 +72,7 @@ def main(cfg: DictConfig) -> None:
         input_kind=input_kind,
         pad_mode=cfg.data.get("pad_mode", "repeat"),
         target_sample_rate=target_sample_rate,
+        max_seconds=cfg.data.get("max_seconds", 30.0),
         qwen3_pretrained=qwen3_pretrained,
     )
 

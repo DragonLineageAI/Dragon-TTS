@@ -33,6 +33,9 @@ class SpeakerDataModule(pl.LightningDataModule):
         input_kind: str = "mel",
         pad_mode: str = "repeat",
         target_sample_rate: Optional[int] = None,
+        # Maximum audio duration (seconds) for waveform_raw mode.
+        # Audio exceeding this is truncated.  Prevents 32-bit index overflow.
+        max_seconds: Optional[float] = 30.0,
         # Qwen3 only: path to pretrained checkpoint for the processor collator.
         # When set (and input_kind=="waveform_raw"), the DataModule uses
         # ``Qwen3Collator`` which delegates mel + padding + masking to
@@ -52,6 +55,7 @@ class SpeakerDataModule(pl.LightningDataModule):
         self.input_kind = input_kind
         self.pad_mode = pad_mode
         self.target_sample_rate = target_sample_rate
+        self.max_seconds = max_seconds
         self.qwen3_pretrained = qwen3_pretrained
 
         self.train_ds: Optional[SpeakerAudioDataset] = None
@@ -77,6 +81,7 @@ class SpeakerDataModule(pl.LightningDataModule):
             input_kind=self.input_kind,
             pad_mode=self.pad_mode,
             target_sample_rate=self.target_sample_rate,
+            max_seconds=self.max_seconds,
         )
         val_cfg = SpeakerAudioDatasetConfig(
             mel=self.mel_cfg,
@@ -86,6 +91,7 @@ class SpeakerDataModule(pl.LightningDataModule):
             input_kind=self.input_kind,
             pad_mode=self.pad_mode,
             target_sample_rate=self.target_sample_rate,
+            max_seconds=self.max_seconds,
         )
         self.train_ds = SpeakerAudioDataset(train_items, train_cfg)
         self.val_ds = SpeakerAudioDataset(val_items, val_cfg)

@@ -61,6 +61,11 @@ class SpeakerAudioDatasetConfig:
     # Set to backbone's native rate (e.g. 24000 for Qwen3) so the dataset emits
     # waveform at the correct rate without backbone-internal resampling.
     target_sample_rate: Optional[int] = None
+    # Maximum audio duration (seconds) for waveform_raw mode.  Audio longer than
+    # this is truncated (random start for train, center for val).  Prevents
+    # 32-bit index overflow in Conv1d reflect-padding inside the ECAPA ASP layer
+    # (overflow at ~78 s with batch_size=64).  Set to None to disable.
+    max_seconds: Optional[float] = 30.0
 
 
 class SpeakerAudioDataset(Dataset):
@@ -82,6 +87,9 @@ class SpeakerAudioDataset(Dataset):
         self._wav_sr = cfg.target_sample_rate or cfg.mel.sample_rate
         self.crop_samples = int(cfg.crop_seconds * self._wav_sr)
         self.min_samples = int(cfg.min_seconds * self._wav_sr)
+        self.max_samples = (
+            int(cfg.max_seconds * self._wav_sr) if cfg.max_seconds else None
+        )
 
     def __len__(self) -> int:
         return len(self.items)
@@ -111,7 +119,15 @@ class SpeakerAudioDataset(Dataset):
         wav = _load_wav(item["wav_path"], self._wav_sr)
 
         if self.cfg.input_kind == "waveform_raw":
-            # Qwen3 path: full-length waveform, no crop/extend.
+            # Qwen3 path: full-length waveform, no fixed-length crop/extend.
+            # Truncate if exceeding max_seconds to avoid 32-bit index overflow.
+            if self.max_samples is not None and wav.shape[0] > self.max_samples:
+                n = wav.shape[0]
+                if self.cfg.deterministic_crop:
+                    start = max(0, (n - self.max_samples) // 2)
+                else:
+                    start = random.randint(0, n - self.max_samples)
+                wav = wav[start : start + self.max_samples]
             inp = wav  # (T_samples,) — variable length
         else:
             if wav.shape[0] < self.min_samples:
