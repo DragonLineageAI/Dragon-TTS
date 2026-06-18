@@ -2,7 +2,7 @@
 
 QUAN TRỌNG: ECAPA trong BiCodec được train trên mel **tuyến tính** (power=1,
 KHÔNG lấy log). SparkVox `Generator.init_mel_transformer` đưa thẳng output của
-`torchaudio MelSpectrogram` vào speaker encoder mà không có log/clamp. Bón log-mel
+MelSpectrogram vào speaker encoder mà không có log/clamp. Bón log-mel
 vào sẽ làm lệch phân phối của các BatchNorm (frozen) trong ECAPA → x_vector nổ
 (norm ~1e6) và MSE không học được.
 """
@@ -14,7 +14,6 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torchaudio.transforms as TT
 
 
 @dataclass
@@ -30,22 +29,29 @@ class MelConfig:
 
 
 class MelSpectrogramFeature(nn.Module):
-    """Linear mel-spectrogram; sao chép `Generator.init_mel_transformer` của BiCodec."""
+    """Linear mel-spectrogram; sao chép `Generator.init_mel_transformer` của BiCodec.
+
+    Uses librosa mel basis + ``torch.stft`` (no torchaudio dependency).
+    """
 
     def __init__(self, cfg: MelConfig):
         super().__init__()
         self.cfg = cfg
-        self.mel = TT.MelSpectrogram(
-            sample_rate=cfg.sample_rate,
-            n_fft=cfg.n_fft,
-            win_length=cfg.win_length,
-            hop_length=cfg.hop_length,
-            f_min=cfg.f_min,
-            f_max=cfg.f_max,
-            n_mels=cfg.n_mels,
-            power=1.0,
-            norm="slaney",
-            mel_scale="slaney",
+        from librosa.filters import mel as librosa_mel_fn
+
+        fmax = cfg.f_max if cfg.f_max is not None else cfg.sample_rate / 2.0
+        mel_basis = torch.from_numpy(
+            librosa_mel_fn(
+                sr=cfg.sample_rate,
+                n_fft=cfg.n_fft,
+                n_mels=cfg.n_mels,
+                fmin=cfg.f_min,
+                fmax=fmax,
+            )
+        ).float()
+        self.register_buffer("mel_basis", mel_basis)
+        self.register_buffer(
+            "hann_window", torch.hann_window(cfg.win_length)
         )
 
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
@@ -59,4 +65,21 @@ class MelSpectrogramFeature(nn.Module):
             wav = wav.unsqueeze(0)
         if wav.dim() == 3:
             wav = wav.squeeze(1)
-        return self.mel(wav)
+
+        cfg = self.cfg
+        # Reflect-pad to center the STFT windows, matching torchaudio behaviour.
+        pad_len = (cfg.n_fft - cfg.hop_length) // 2
+        wav = torch.nn.functional.pad(wav.unsqueeze(1), (pad_len, pad_len), mode="reflect").squeeze(1)
+
+        spec = torch.stft(
+            wav,
+            cfg.n_fft,
+            hop_length=cfg.hop_length,
+            win_length=cfg.win_length,
+            window=self.hann_window,
+            center=False,
+            return_complex=True,
+        )
+        spec = torch.abs(spec)  # magnitude: (B, n_fft//2+1, T_frames)
+        mel = torch.matmul(self.mel_basis, spec)  # (B, n_mels, T_frames)
+        return mel  # LINEAR — no log

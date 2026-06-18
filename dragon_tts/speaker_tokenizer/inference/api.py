@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Union
 
+import numpy as np
+import soundfile as sf
 import torch
-import torchaudio
 
 from dragon_tts.speaker_tokenizer.data.mel import MelConfig, MelSpectrogramFeature
 from dragon_tts.speaker_tokenizer.model import SpeakerTokenizer
@@ -66,14 +67,13 @@ class SpeakerTokenizerPipeline:
     # ------------------------------------------------------------------
 
     def _load_wav(self, path: Union[str, Path]) -> torch.Tensor:
-        wav, sr = torchaudio.load(str(path))
-        if wav.shape[0] > 1:
-            wav = wav.mean(dim=0, keepdim=True)
+        wav, sr = sf.read(str(path), dtype="float32", always_2d=True)
+        wav = wav.mean(axis=1)  # mono
         if sr != self._wav_sample_rate:
-            wav = torchaudio.functional.resample(
-                wav, sr, self._wav_sample_rate
-            )
-        return wav.to(self.device)  # (1, T)
+            import librosa
+
+            wav = librosa.resample(wav, orig_sr=sr, target_sr=self._wav_sample_rate)
+        return torch.from_numpy(wav).unsqueeze(0).to(self.device)  # (1, T)
 
     def _to_input(self, audio: AudioInput):
         """Prepare the model input + optional attention_mask.

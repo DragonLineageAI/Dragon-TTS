@@ -8,8 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Union
 
+import numpy as np
+import soundfile as sf
 import torch
-import torchaudio
 from torch.utils.data import Dataset
 
 from dragon_tts.speaker_tokenizer.data.mel import MelConfig, MelSpectrogramFeature
@@ -28,12 +29,14 @@ def _load_manifest(path: str) -> List[Dict[str, Any]]:
 
 def _load_wav(path: str, target_sr: int) -> torch.Tensor:
     """Load wav, downmix to mono, resample to target_sr. Returns (T,)."""
-    wav, sr = torchaudio.load(path)
-    if wav.shape[0] > 1:
-        wav = wav.mean(dim=0, keepdim=True)
+    wav, sr = sf.read(path, dtype="float32", always_2d=True)
+    # (samples, channels) → mono
+    wav = wav.mean(axis=1)
     if sr != target_sr:
-        wav = torchaudio.functional.resample(wav, sr, target_sr)
-    return wav.squeeze(0)
+        import librosa
+
+        wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+    return torch.from_numpy(wav)
 
 
 @dataclass
