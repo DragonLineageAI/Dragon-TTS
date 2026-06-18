@@ -34,18 +34,30 @@ def main(cfg: DictConfig) -> None:
 
     mel_cfg = MelConfig(**_to_python(cfg.mel))
 
-    # ecapa → mel features; wavlm/redimnet/qwen3 → raw waveform.
+    # ecapa → mel features; wavlm/redimnet → raw waveform (fixed-length crop);
+    # qwen3 → raw waveform without crop (variable-length + attention_mask).
     encoder_type = cfg.model.encoder.type
-    input_kind = "waveform" if encoder_type in ("wavlm", "redimnet", "qwen3") else "mel"
+    if encoder_type == "qwen3":
+        input_kind = "waveform_raw"
+    elif encoder_type in ("wavlm", "redimnet"):
+        input_kind = "waveform"
+    else:
+        input_kind = "mel"
 
     # Derive target_sample_rate for waveform backbones.  When the backbone's
     # native sample rate differs from mel_cfg.sample_rate (16 kHz), the dataset
     # must resample to the backbone's rate (e.g. 24 kHz for qwen3).
     target_sample_rate = None
-    if input_kind == "waveform":
+    if input_kind in ("waveform", "waveform_raw"):
         enc_sr = cfg.model.encoder.get("sample_rate", None)
         if enc_sr is not None and int(enc_sr) != mel_cfg.sample_rate:
             target_sample_rate = int(enc_sr)
+
+    # For qwen3: pass pretrained path so DataModule can create Qwen3Collator
+    # (which delegates mel + padding + masking to EcapaTdnnFeatureExtractor).
+    qwen3_pretrained = None
+    if encoder_type == "qwen3":
+        qwen3_pretrained = str(cfg.model.encoder.pretrained)
 
     dm = SpeakerDataModule(
         manifest=cfg.data.manifest,
@@ -60,6 +72,7 @@ def main(cfg: DictConfig) -> None:
         input_kind=input_kind,
         pad_mode=cfg.data.get("pad_mode", "repeat"),
         target_sample_rate=target_sample_rate,
+        qwen3_pretrained=qwen3_pretrained,
     )
 
     lit = SpeakerTokenizerLit(

@@ -42,21 +42,30 @@ def _build_model() -> SpeakerTokenizer:
     return model
 
 
+def _preprocess(model, wav_tensor):
+    """Use the backbone's processor to convert waveform → mel + mask."""
+    backbone = model.speaker_encoder
+    features = backbone.preprocess(wav_tensor)
+    return features["input_values"], features["attention_mask"]
+
+
 def test_forward_shapes_qwen3():
     model = _build_model()
     wav = torch.randn(2, 24000)  # 1 s @ 24 kHz
-    x_vec, d_vec, indices = model(wav)
+    mel, mask = _preprocess(model, wav)
+    x_vec, d_vec, indices = model(mel, attention_mask=mask)
     assert x_vec.shape == (2, 2048), x_vec.shape  # Qwen3 embedding dim
     assert d_vec.shape == (2, 2048), d_vec.shape
     assert indices.shape == (2, 1, 32), indices.shape
     assert model.codebook_size == 4096
-    assert model.input_kind == "waveform"
+    assert model.input_kind == "waveform_raw"
 
 
 def test_round_trip_deterministic_qwen3():
     model = _build_model()
     wav = torch.randn(3, 24000)
-    _, d_vec_forward, indices = model(wav)
+    mel, mask = _preprocess(model, wav)
+    _, d_vec_forward, indices = model(mel, attention_mask=mask)
     d_vec_detok = model.detokenize(indices)
     assert torch.allclose(d_vec_forward, d_vec_detok, atol=1e-5)
 
@@ -87,10 +96,38 @@ def test_features_shape_qwen3():
     """Verify context_dim = 1536 from concatenated SE-Res2Net block outputs."""
     model = _build_model()
     wav = torch.randn(1, 24000)
+    mel, mask = _preprocess(model, wav)
     backbone = model.speaker_encoder
     with torch.no_grad():
-        x_vec, features = backbone(wav)
+        x_vec, features = backbone(mel, attention_mask=mask)
     assert features.shape[0] == 1
     assert features.shape[1] == 1536, f"Expected context_dim=1536, got {features.shape[1]}"
     assert features.dim() == 3  # (B, 1536, T)
     assert x_vec.shape == (1, 2048)
+
+
+def test_variable_length_with_mask_qwen3():
+    """Variable-length batch via processor should produce valid outputs."""
+    model = _build_model()
+    # Two audios of different lengths
+    wav_1s = torch.randn(24000)   # 1 second
+    wav_05s = torch.randn(12000)  # 0.5 seconds
+    # Processor handles padding + mask generation
+    backbone = model.speaker_encoder
+    import numpy as np
+    features = backbone.preprocess(
+        [wav_1s.numpy(), wav_05s.numpy()],
+        sampling_rate=24000,
+    )
+    mel = features["input_values"]
+    mask = features["attention_mask"]
+    x_vec, d_vec, indices = model(mel, attention_mask=mask)
+    assert x_vec.shape == (2, 2048)
+    assert d_vec.shape == (2, 2048)
+    assert indices.shape == (2, 1, 32)
+    # Both embeddings should be finite
+    assert torch.isfinite(x_vec).all()
+    assert torch.isfinite(d_vec).all()
+    # Mask should reflect different lengths
+    assert mask.shape[0] == 2
+    assert mask[0].sum() >= mask[1].sum()  # first audio is longer

@@ -151,13 +151,15 @@ class SpeakerTokenizer(nn.Module):
             self.speaker_encoder.eval()
         return self
 
-    def _encode_features(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _encode_features(
+        self, x: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Run the backbone. If frozen, no grad."""
         if self._encoder_frozen:
             with torch.no_grad():
-                x_vector, features = self.speaker_encoder(x)
+                x_vector, features = self.speaker_encoder(x, attention_mask=attention_mask)
         else:
-            x_vector, features = self.speaker_encoder(x)
+            x_vector, features = self.speaker_encoder(x, attention_mask=attention_mask)
         return x_vector, features
 
     # ------------------------------------------------------------------
@@ -165,11 +167,14 @@ class SpeakerTokenizer(nn.Module):
     # ------------------------------------------------------------------
 
     def forward(
-        self, x: torch.Tensor
+        self, x: torch.Tensor, attention_mask: torch.Tensor | None = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Args:
             x: encoder input — mel ``(B, n_mels, T)`` for ecapa, or raw waveform
-               ``(B, T)`` for wavlm (see ``self.input_kind``).
+               ``(B, T)`` for wavlm/redimnet/qwen3 (see ``self.input_kind``).
+            attention_mask: optional ``(B, T)`` long mask for variable-length
+               waveform batches.  1 = valid, 0 = padding.  Only used by
+               backbones that support masking (e.g. Qwen3).
 
         Returns:
             x_vector: (B, out_dim) raw backbone embedding (reconstruction target).
@@ -177,7 +182,7 @@ class SpeakerTokenizer(nn.Module):
             indices:  (B, num_quantizers, token_num) global token indices
                 (channels-first convention, khớp với SparkVox SpeakerEncoder).
         """
-        x_vector, features = self._encode_features(x)
+        x_vector, features = self._encode_features(x, attention_mask=attention_mask)
 
         h = self.perceiver_sampler(features.transpose(1, 2)).transpose(1, 2)
         zq, indices = self.quantizer(h)
@@ -186,9 +191,11 @@ class SpeakerTokenizer(nn.Module):
         return x_vector, d_vector, indices
 
     @torch.no_grad()
-    def tokenize(self, x: torch.Tensor) -> torch.Tensor:
+    def tokenize(
+        self, x: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Return indices only, skipping the projection branch."""
-        _, features = self._encode_features(x)
+        _, features = self._encode_features(x, attention_mask=attention_mask)
         h = self.perceiver_sampler(features.transpose(1, 2)).transpose(1, 2)
         _, indices = self.quantizer(h)
         return indices

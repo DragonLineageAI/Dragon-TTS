@@ -8,6 +8,7 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 
 from dragon_tts.speaker_tokenizer.data.audio_dataset import (
+    Qwen3Collator,
     SpeakerAudioDataset,
     SpeakerAudioDatasetConfig,
     collate_inputs,
@@ -32,6 +33,11 @@ class SpeakerDataModule(pl.LightningDataModule):
         input_kind: str = "mel",
         pad_mode: str = "repeat",
         target_sample_rate: Optional[int] = None,
+        # Qwen3 only: path to pretrained checkpoint for the processor collator.
+        # When set (and input_kind=="waveform_raw"), the DataModule uses
+        # ``Qwen3Collator`` which delegates mel + padding + masking to
+        # ``EcapaTdnnFeatureExtractor``.
+        qwen3_pretrained: Optional[str] = None,
     ):
         super().__init__()
         self.manifest = manifest
@@ -46,6 +52,7 @@ class SpeakerDataModule(pl.LightningDataModule):
         self.input_kind = input_kind
         self.pad_mode = pad_mode
         self.target_sample_rate = target_sample_rate
+        self.qwen3_pretrained = qwen3_pretrained
 
         self.train_ds: Optional[SpeakerAudioDataset] = None
         self.val_ds: Optional[SpeakerAudioDataset] = None
@@ -83,6 +90,14 @@ class SpeakerDataModule(pl.LightningDataModule):
         self.train_ds = SpeakerAudioDataset(train_items, train_cfg)
         self.val_ds = SpeakerAudioDataset(val_items, val_cfg)
 
+    def _collate_fn(self):
+        if self.input_kind == "waveform_raw" and self.qwen3_pretrained:
+            return Qwen3Collator(
+                self.qwen3_pretrained,
+                self.target_sample_rate or 24000,
+            )
+        return collate_inputs
+
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
             self.train_ds,
@@ -91,7 +106,7 @@ class SpeakerDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             drop_last=True,
-            collate_fn=collate_inputs,
+            collate_fn=self._collate_fn(),
             persistent_workers=self.num_workers > 0,
         )
 
@@ -103,6 +118,6 @@ class SpeakerDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             drop_last=False,
-            collate_fn=collate_inputs,
+            collate_fn=self._collate_fn(),
             persistent_workers=self.num_workers > 0,
         )

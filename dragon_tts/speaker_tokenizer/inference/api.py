@@ -38,7 +38,8 @@ class SpeakerTokenizerPipeline:
         lit.eval()
         lit.to(self.device)
         self.model: SpeakerTokenizer = lit.model
-        # "mel" (ECAPA) or "waveform" (WavLM/ReDimNet/Qwen3) — round-trips via model_cfg.encoder.
+        # "mel" (ECAPA), "waveform" (WavLM/ReDimNet), or "waveform_raw" (Qwen3)
+        # — round-trips via model_cfg.encoder.
         self.input_kind = self.model.input_kind
 
         if mel_cfg is None:
@@ -74,18 +75,33 @@ class SpeakerTokenizerPipeline:
             )
         return wav.to(self.device)  # (1, T)
 
-    def _to_input(self, audio: AudioInput) -> torch.Tensor:
-        """Prepare the model input: mel (B, n_mels, T) for ECAPA, or raw
-        waveform (B, T) for WavLM/ReDimNet/Qwen3, depending on the loaded encoder."""
+    def _to_input(self, audio: AudioInput):
+        """Prepare the model input + optional attention_mask.
+
+        Returns:
+            (inp, mask) where:
+            - ECAPA:  inp = mel (B, n_mels, T),  mask = None
+            - WavLM/ReDimNet: inp = waveform (B, T),  mask = None
+            - Qwen3:  inp = log-mel (B, T, 128),  mask = (B, T) from processor
+        """
         if isinstance(audio, (str, Path)):
             wav = self._load_wav(audio)  # (1, T)
         else:
             wav = audio.to(self.device)
             if wav.dim() == 1:
                 wav = wav.unsqueeze(0)
+
+        if self.input_kind == "waveform_raw":
+            # Qwen3 path: use backbone's processor to compute mel + mask.
+            backbone = self.model.speaker_encoder
+            features = backbone.preprocess(wav.cpu(), sampling_rate=self._wav_sample_rate)
+            mel = features["input_values"].to(self.device)
+            mask = features["attention_mask"].to(self.device)
+            return mel, mask
+
         if self.input_kind == "waveform":
-            return wav  # (B, T)
-        return self.mel(wav)  # (B, n_mels, T)
+            return wav, None  # (B, T)
+        return self.mel(wav), None  # (B, n_mels, T)
 
     # ------------------------------------------------------------------
     # Public API
@@ -93,8 +109,8 @@ class SpeakerTokenizerPipeline:
 
     @torch.no_grad()
     def tokenize(self, audio: AudioInput) -> torch.Tensor:
-        inp = self._to_input(audio)
-        return self.model.tokenize(inp)
+        inp, mask = self._to_input(audio)
+        return self.model.tokenize(inp, attention_mask=mask)
 
     @torch.no_grad()
     def detokenize(self, indices: torch.Tensor) -> torch.Tensor:
@@ -103,8 +119,8 @@ class SpeakerTokenizerPipeline:
     @torch.no_grad()
     def encode(self, audio: AudioInput) -> dict:
         """Return all forward outputs: x_vector, d_vector, indices."""
-        inp = self._to_input(audio)
-        x_vec, d_vec, indices = self.model(inp)
+        inp, mask = self._to_input(audio)
+        x_vec, d_vec, indices = self.model(inp, attention_mask=mask)
         return {"x_vector": x_vec, "d_vector": d_vec, "indices": indices}
 
     @torch.no_grad()

@@ -24,7 +24,6 @@ from typing import Any, Dict, Tuple
 
 import torch
 import torch.nn as nn
-import torchaudio.transforms as TT
 
 from dragon_tts.modules.ecapa.ecapa_tdnn import ECAPA_TDNN_GLOB_c512
 
@@ -45,7 +44,9 @@ class SpeakerBackbone(nn.Module):
         """Dim ``E`` of ``x_vector`` (== tokenizer out_dim / projection output)."""
         raise NotImplementedError
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns ``(x_vector (B, E), features (B, C, T))``."""
         raise NotImplementedError
 
@@ -89,7 +90,9 @@ class EcapaBackbone(SpeakerBackbone):
         """Load a standalone ECAPA state_dict (bare keys) into the encoder."""
         return self.encoder.load_state_dict(state_dict, strict=strict)
 
-    def forward(self, mels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, mels: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         x = mels.transpose(1, 2)  # ECAPA expects (B, T, F)
         x_vector, features = self.encoder(x, True)  # (B, embed_dim), (B, 1536, T)
         return x_vector, features
@@ -144,7 +147,9 @@ class ReDimNetBackbone(SpeakerBackbone):
     def embed_dim(self) -> int:
         return self._embed_dim
 
-    def forward(self, wav: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, wav: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         if wav.dim() == 1:
             wav = wav.unsqueeze(0)
 
@@ -211,7 +216,9 @@ class WavLMBackbone(SpeakerBackbone):
         std = wav.std(dim=-1, keepdim=True)
         return (wav - mean) / (std + 1e-7)
 
-    def forward(self, wav: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, wav: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         if wav.dim() == 1:
             wav = wav.unsqueeze(0)
         if self.do_normalize:
@@ -223,20 +230,27 @@ class WavLMBackbone(SpeakerBackbone):
 
 
 class Qwen3EcapaBackbone(SpeakerBackbone):
-    """Frozen Qwen3-TTS ECAPA-TDNN on log-mel @ 24 kHz waveform.
+    """Frozen Qwen3-TTS ECAPA-TDNN speaker encoder.
 
     Loads ``EcapaTdnnSpeakerEncoder`` via
     ``AutoModel.from_pretrained(pretrained, trust_remote_code=True)``.
 
-    Internally computes log-mel from raw waveform using torchaudio, matching
-    the Qwen3-TTS preprocessing exactly (24 kHz, 128 mels, hop=256,
-    fmin=0, fmax=12000, log-compression).
+    **Training path** (``input_kind="waveform_raw"``):
+    The dataset emits full-length raw waveform (no crop/extend).
+    ``Qwen3Collator`` (backed by ``EcapaTdnnFeatureExtractor``) converts
+    waveforms to padded log-mel ``(B, T, 128)`` + ``attention_mask``
+    before the backbone ever sees the data.  So ``forward()`` receives
+    **pre-computed mel**, not raw waveform.
+
+    **Inference path**:
+    Use ``preprocess()`` to convert raw waveform(s) to mel + mask, then
+    pass to ``forward()``.
 
     x_vector:  ``(B, 2048)``  — pooled speaker embedding (reconstruction target).
     features:  ``(B, 1536, T)`` — frame-level features after MFA (PerceiverResampler context).
     """
 
-    input_kind = "waveform"
+    input_kind = "waveform_raw"
 
     def __init__(
         self,
@@ -245,7 +259,7 @@ class Qwen3EcapaBackbone(SpeakerBackbone):
         freeze: bool = True,
     ):
         super().__init__()
-        from transformers import AutoModel
+        from transformers import AutoModel, AutoProcessor
 
         self.model = AutoModel.from_pretrained(pretrained, trust_remote_code=True)
         self._sample_rate = sample_rate
@@ -253,20 +267,9 @@ class Qwen3EcapaBackbone(SpeakerBackbone):
         self._embed_dim = int(self.model.config.enc_dim)  # 2048
         self._freeze = freeze
 
-        # Log-mel transform matching Qwen3-TTS preprocessing.
-        # NOTE: Qwen3 uses librosa's mel basis (slaney), which is the torchaudio
-        # default for norm="slaney" + mel_scale="slaney".
-        self._mel = TT.MelSpectrogram(
-            sample_rate=sample_rate,
-            n_fft=1024,
-            win_length=1024,
-            hop_length=256,
-            f_min=0.0,
-            f_max=12000.0,
-            n_mels=128,
-            power=1.0,  # magnitude spectrogram, then log-compress below
-            norm="slaney",
-            mel_scale="slaney",
+        # Keep processor for inference path (preprocess()).
+        self._processor = AutoProcessor.from_pretrained(
+            pretrained, trust_remote_code=True
         )
 
     @property
@@ -281,25 +284,52 @@ class Qwen3EcapaBackbone(SpeakerBackbone):
     def embed_dim(self) -> int:
         return self._embed_dim
 
-    def _compute_log_mel(self, wav: torch.Tensor) -> torch.Tensor:
-        """Compute log-mel from waveform, matching Qwen3-TTS preprocessing.
+    def preprocess(
+        self,
+        raw_speech,
+        sampling_rate: int | None = None,
+    ):
+        """Convert raw waveform(s) to mel + attention_mask via the processor.
+
+        Convenience method for inference (no DataLoader / collator).
 
         Args:
-            wav: (B, T) raw waveform at ``self._sample_rate``.
+            raw_speech: ``np.ndarray``, ``list[np.ndarray]``, ``torch.Tensor``,
+                or file path ``str``.
+            sampling_rate: sample rate of the input audio(s).
 
         Returns:
-            log_mel: (B, T_frames, n_mels) — note time-first for Qwen3 model input.
+            dict with ``input_values`` ``(B, T, 128)`` and
+            ``attention_mask`` ``(B, T)`` tensors.
         """
-        mel = self._mel(wav)  # (B, n_mels, T_frames)
-        log_mel = torch.log(torch.clamp(mel, min=1e-5))
-        return log_mel.transpose(1, 2)  # (B, T_frames, n_mels)
+        import numpy as np
 
-    def forward(self, wav: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        if wav.dim() == 1:
-            wav = wav.unsqueeze(0)
+        if isinstance(raw_speech, torch.Tensor):
+            raw_speech = raw_speech.numpy()
+        sr = sampling_rate or self._sample_rate
+        features = self._processor(raw_speech, sampling_rate=sr)
+        return {
+            "input_values": features["input_values"],
+            "attention_mask": features["attention_mask"],
+        }
 
-        log_mel = self._compute_log_mel(wav)
-        out = self.model(input_values=log_mel, return_features=True)
+    def forward(
+        self, mel: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass on pre-computed log-mel.
+
+        Args:
+            mel: ``(B, T_frames, n_mels)`` log-mel spectrogram, already padded.
+                Produced by ``Qwen3Collator`` (training) or ``preprocess()``
+                (inference).
+            attention_mask: ``(B, T_frames)`` long mask.  1 = real frame,
+                0 = padding.  ``None`` = all frames valid.
+        """
+        out = self.model(
+            input_values=mel,
+            attention_mask=attention_mask,
+            return_features=True,
+        )
         x_vector = out.last_hidden_state  # (B, 2048)
         features = out.hidden_states[0]   # (B, 1536, T)
         return x_vector, features

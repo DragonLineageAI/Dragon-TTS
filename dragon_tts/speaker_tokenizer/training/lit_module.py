@@ -126,7 +126,8 @@ class SpeakerTokenizerLit(pl.LightningModule):
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int):
         inp = batch["input"]
-        x_vec, d_vec, indices = self.model(inp)
+        mask = batch.get("attention_mask", None)
+        x_vec, d_vec, indices = self.model(inp, attention_mask=mask)
         losses = self._compute_losses(x_vec, d_vec, indices)
 
         bs = inp.shape[0]
@@ -143,7 +144,8 @@ class SpeakerTokenizerLit(pl.LightningModule):
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
         inp = batch["input"]
-        x_vec, d_vec, indices = self.model(inp)
+        mask = batch.get("attention_mask", None)
+        x_vec, d_vec, indices = self.model(inp, attention_mask=mask)
         losses = self._compute_losses(x_vec, d_vec, indices)
 
         bs = inp.shape[0]

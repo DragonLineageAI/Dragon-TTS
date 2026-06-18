@@ -42,8 +42,12 @@ class SpeakerAudioDatasetConfig:
     crop_seconds: float = 4.0
     min_seconds: float = 1.0
     deterministic_crop: bool = False  # True for val/eval
-    # "mel"  → emit linear mel (B, n_mels, T) for the ECAPA backbone.
-    # "waveform" → emit raw waveform (B, T) for WavLM / ReDimNet / Qwen3 backbones.
+    # "mel"          → emit linear mel (B, n_mels, T) for the ECAPA backbone.
+    # "waveform"     → emit raw waveform (B, T) for WavLM / ReDimNet backbones
+    #                   (fixed-length via crop/extend).
+    # "waveform_raw" → emit raw waveform WITHOUT crop/extend (variable length),
+    #                   for backbones that handle masking natively (e.g. Qwen3).
+    #                   Requires ``collate_variable_length`` as collate_fn.
     input_kind: str = "mel"
     # Cách kéo dài clip ngắn hơn crop_seconds:
     #   "zero"   → đệm 0 (silence) ở cuối.
@@ -102,13 +106,19 @@ class SpeakerAudioDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.items[idx]
         wav = _load_wav(item["wav_path"], self._wav_sr)
-        if wav.shape[0] < self.min_samples:
-            wav = self._extend(wav, self.min_samples)
-        wav = self._crop(wav)
-        if self.cfg.input_kind == "waveform":
-            inp = wav  # (T_samples,)
+
+        if self.cfg.input_kind == "waveform_raw":
+            # Qwen3 path: full-length waveform, no crop/extend.
+            inp = wav  # (T_samples,) — variable length
         else:
-            inp = self.mel_fn(wav.unsqueeze(0)).squeeze(0)  # (n_mels, T)
+            if wav.shape[0] < self.min_samples:
+                wav = self._extend(wav, self.min_samples)
+            wav = self._crop(wav)
+            if self.cfg.input_kind == "waveform":
+                inp = wav  # (T_samples,)
+            else:
+                inp = self.mel_fn(wav.unsqueeze(0)).squeeze(0)  # (n_mels, T)
+
         return {
             "input": inp,
             "speaker_id": item.get("speaker_id", ""),
@@ -124,6 +134,40 @@ def collate_inputs(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "speaker_id": [b["speaker_id"] for b in batch],
         "wav_path": [b["wav_path"] for b in batch],
     }
+
+
+class Qwen3Collator:
+    """Collate for Qwen3: delegates to ``EcapaTdnnFeatureExtractor``.
+
+    The processor handles mel computation (librosa + torch.stft), resampling,
+    padding to max length, and ``attention_mask`` generation — all in one call.
+
+    Used with ``input_kind="waveform_raw"`` where the dataset emits full-length
+    raw waveform tensors (no crop/extend).
+
+    Returns:
+        input: (B, T_mel, n_mels) log-mel spectrogram, padded.
+        attention_mask: (B, T_mel) long — 1 for real frames, 0 for padding.
+    """
+
+    def __init__(self, pretrained: str, sample_rate: int = 24000):
+        from transformers import AutoProcessor
+
+        self.processor = AutoProcessor.from_pretrained(
+            pretrained, trust_remote_code=True
+        )
+        self.sample_rate = sample_rate
+
+    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # Convert waveform tensors to numpy for the processor.
+        wavs = [b["input"].numpy() for b in batch]
+        features = self.processor(wavs, sampling_rate=self.sample_rate)
+        return {
+            "input": features["input_values"],            # (B, T_mel, n_mels)
+            "attention_mask": features["attention_mask"],  # (B, T_mel)
+            "speaker_id": [b["speaker_id"] for b in batch],
+            "wav_path": [b["wav_path"] for b in batch],
+        }
 
 
 # Backward-compatible alias.
