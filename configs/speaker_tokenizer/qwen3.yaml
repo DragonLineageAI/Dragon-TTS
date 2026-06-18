@@ -1,0 +1,23 @@
+# Qwen3-Voice-Embedding speaker-tokenizer config (Qwen3-TTS ECAPA-TDNN encoder).
+# Inherits everything from base.yaml and swaps the encoder to Qwen3 ECAPA-TDNN.
+# Usage:
+#   python scripts/speaker_tokenizer/train.py --config-name qwen3 \
+#       data.manifest=/path/train.jsonl
+# No separate encoder ckpt needed — weights load via AutoModel.from_pretrained.
+#
+# The reconstruction target becomes Qwen3-TTS's native 2048-d xvector embedding;
+# context_dim (1536) and out_dim (2048) are derived from the backbone.
+# The dataset emits raw 24 kHz waveform (input_kind + target_sample_rate derived
+# from encoder.type and encoder.sample_rate in train.py).
+
+defaults:
+  - base
+  - _self_
+
+model:
+  encoder:
+    type: qwen3
+    pretrained: ./ckpts/Qwen3-Voice-Embedding-12Hz-1.7B  # HF id or local path
+    sample_rate: 24000
+    freeze: true
+    ckpt: null        # no separate checkpoint; weights from from_pretrained

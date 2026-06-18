@@ -6,9 +6,11 @@ A backbone turns audio into:
   - ``features`` ``(B, context_dim, T)`` — frame-level features that feed the
     PerceiverResampler as cross-attention context.
 
-Two backbones are provided, selectable via config:
-  - ``ecapa``  — frozen ECAPA-TDNN on LINEAR mel (the original design).
-  - ``wavlm``  — frozen ``microsoft/wavlm-base-plus-sv`` on raw 16 kHz waveform.
+Four backbones are provided, selectable via config:
+  - ``ecapa``    — frozen ECAPA-TDNN on LINEAR mel (the original design).
+  - ``wavlm``    — frozen ``microsoft/wavlm-base-plus-sv`` on raw 16 kHz waveform.
+  - ``redimnet`` — frozen ``IDRnD/ReDimNet`` on raw 16 kHz waveform.
+  - ``qwen3``    — frozen Qwen3-TTS ECAPA-TDNN on log-mel @ 24 kHz waveform.
 
 Everything downstream (PerceiverResampler → ResidualFSQ → projection) is
 encoder-agnostic and only needs ``context_dim`` / ``embed_dim`` to be sized
@@ -22,6 +24,7 @@ from typing import Any, Dict, Tuple
 
 import torch
 import torch.nn as nn
+import torchaudio.transforms as TT
 
 from dragon_tts.modules.ecapa.ecapa_tdnn import ECAPA_TDNN_GLOB_c512
 
@@ -219,12 +222,96 @@ class WavLMBackbone(SpeakerBackbone):
         return x_vector, features
 
 
+class Qwen3EcapaBackbone(SpeakerBackbone):
+    """Frozen Qwen3-TTS ECAPA-TDNN on log-mel @ 24 kHz waveform.
+
+    Loads ``EcapaTdnnSpeakerEncoder`` via
+    ``AutoModel.from_pretrained(pretrained, trust_remote_code=True)``.
+
+    Internally computes log-mel from raw waveform using torchaudio, matching
+    the Qwen3-TTS preprocessing exactly (24 kHz, 128 mels, hop=256,
+    fmin=0, fmax=12000, log-compression).
+
+    x_vector:  ``(B, 2048)``  — pooled speaker embedding (reconstruction target).
+    features:  ``(B, 1536, T)`` — frame-level features after MFA (PerceiverResampler context).
+    """
+
+    input_kind = "waveform"
+
+    def __init__(
+        self,
+        pretrained: str = "./ckpts/Qwen3-Voice-Embedding-12Hz-1.7B",
+        sample_rate: int = 24000,
+        freeze: bool = True,
+    ):
+        super().__init__()
+        from transformers import AutoModel
+
+        self.model = AutoModel.from_pretrained(pretrained, trust_remote_code=True)
+        self._sample_rate = sample_rate
+        self._context_dim = int(self.model.config.enc_channels[-1])  # 1536
+        self._embed_dim = int(self.model.config.enc_dim)  # 2048
+        self._freeze = freeze
+
+        # Log-mel transform matching Qwen3-TTS preprocessing.
+        # NOTE: Qwen3 uses librosa's mel basis (slaney), which is the torchaudio
+        # default for norm="slaney" + mel_scale="slaney".
+        self._mel = TT.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=1024,
+            win_length=1024,
+            hop_length=256,
+            f_min=0.0,
+            f_max=12000.0,
+            n_mels=128,
+            power=1.0,  # magnitude spectrogram, then log-compress below
+            norm="slaney",
+            mel_scale="slaney",
+        )
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    @property
+    def context_dim(self) -> int:
+        return self._context_dim
+
+    @property
+    def embed_dim(self) -> int:
+        return self._embed_dim
+
+    def _compute_log_mel(self, wav: torch.Tensor) -> torch.Tensor:
+        """Compute log-mel from waveform, matching Qwen3-TTS preprocessing.
+
+        Args:
+            wav: (B, T) raw waveform at ``self._sample_rate``.
+
+        Returns:
+            log_mel: (B, T_frames, n_mels) — note time-first for Qwen3 model input.
+        """
+        mel = self._mel(wav)  # (B, n_mels, T_frames)
+        log_mel = torch.log(torch.clamp(mel, min=1e-5))
+        return log_mel.transpose(1, 2)  # (B, T_frames, n_mels)
+
+    def forward(self, wav: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if wav.dim() == 1:
+            wav = wav.unsqueeze(0)
+
+        log_mel = self._compute_log_mel(wav)
+        out = self.model(input_values=log_mel, return_features=True)
+        x_vector = out.last_hidden_state  # (B, 2048)
+        features = out.hidden_states[0]   # (B, 1536, T)
+        return x_vector, features
+
+
 def build_backbone(encoder_cfg: Dict[str, Any]) -> SpeakerBackbone:
     """Construct a backbone from a config dict with a ``type`` key.
 
     ``type="ecapa"``    → ``EcapaBackbone(feat_dim, embed_dim, channels)``
     ``type="wavlm"``    → ``WavLMBackbone(pretrained, do_normalize, freeze)``
     ``type="redimnet"`` → ``ReDimNetBackbone(model_name, train_type, dataset, freeze)``
+    ``type="qwen3"``    → ``Qwen3EcapaBackbone(pretrained, sample_rate, freeze)``
 
     Extra keys not consumed by the backbone (e.g. ``ckpt``) are ignored here;
     the SpeakerTokenizer / LightningModule handle checkpoint loading.
@@ -250,7 +337,13 @@ def build_backbone(encoder_cfg: Dict[str, Any]) -> SpeakerBackbone:
             dataset=cfg.get("dataset", "vb2+vox2+cnc"),
             freeze=cfg.get("freeze", True),
         )
+    if enc_type == "qwen3":
+        return Qwen3EcapaBackbone(
+            pretrained=cfg.get("pretrained", "./ckpts/Qwen3-Voice-Embedding-12Hz-1.7B"),
+            sample_rate=cfg.get("sample_rate", 24000),
+            freeze=cfg.get("freeze", True),
+        )
     raise ValueError(
-        f"Unknown encoder type: {enc_type!r} (expected 'ecapa', 'wavlm', or 'redimnet')"
+        f"Unknown encoder type: {enc_type!r} (expected 'ecapa', 'wavlm', 'redimnet', or 'qwen3')"
     )
 

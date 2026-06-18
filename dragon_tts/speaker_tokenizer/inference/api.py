@@ -38,14 +38,22 @@ class SpeakerTokenizerPipeline:
         lit.eval()
         lit.to(self.device)
         self.model: SpeakerTokenizer = lit.model
-        # "mel" (ECAPA) or "waveform" (WavLM) — round-trips via model_cfg.encoder.
+        # "mel" (ECAPA) or "waveform" (WavLM/ReDimNet/Qwen3) — round-trips via model_cfg.encoder.
         self.input_kind = self.model.input_kind
 
         if mel_cfg is None:
             mel_cfg = MelConfig()  # defaults: 16 kHz / 128 mels / linear — matches BiCodec
         self.mel_cfg = mel_cfg
-        # Mel transform is only needed for the ECAPA (mel) path; for WavLM the
-        # backbone consumes raw waveform and normalizes internally.
+
+        # Determine the target sample rate for audio loading:
+        # - For waveform backbones with a native sample_rate (e.g. Qwen3 @ 24kHz),
+        #   use that rate so the backbone doesn't need to resample internally.
+        # - Otherwise, use mel_cfg.sample_rate (16kHz).
+        backbone_sr = getattr(self.model.speaker_encoder, "sample_rate", None)
+        self._wav_sample_rate = backbone_sr if backbone_sr is not None else mel_cfg.sample_rate
+
+        # Mel transform is only needed for the ECAPA (mel) path; for waveform
+        # backbones the backbone consumes raw waveform and normalizes internally.
         self.mel = (
             MelSpectrogramFeature(mel_cfg).to(self.device)
             if self.input_kind == "mel"
@@ -60,15 +68,15 @@ class SpeakerTokenizerPipeline:
         wav, sr = torchaudio.load(str(path))
         if wav.shape[0] > 1:
             wav = wav.mean(dim=0, keepdim=True)
-        if sr != self.mel_cfg.sample_rate:
+        if sr != self._wav_sample_rate:
             wav = torchaudio.functional.resample(
-                wav, sr, self.mel_cfg.sample_rate
+                wav, sr, self._wav_sample_rate
             )
         return wav.to(self.device)  # (1, T)
 
     def _to_input(self, audio: AudioInput) -> torch.Tensor:
         """Prepare the model input: mel (B, n_mels, T) for ECAPA, or raw
-        waveform (B, T) for WavLM, depending on the loaded encoder."""
+        waveform (B, T) for WavLM/ReDimNet/Qwen3, depending on the loaded encoder."""
         if isinstance(audio, (str, Path)):
             wav = self._load_wav(audio)  # (1, T)
         else:

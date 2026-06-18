@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Union
 
@@ -43,13 +43,17 @@ class SpeakerAudioDatasetConfig:
     min_seconds: float = 1.0
     deterministic_crop: bool = False  # True for val/eval
     # "mel"  → emit linear mel (B, n_mels, T) for the ECAPA backbone.
-    # "waveform" → emit raw 16 kHz waveform (B, T) for the WavLM backbone.
+    # "waveform" → emit raw waveform (B, T) for WavLM / ReDimNet / Qwen3 backbones.
     input_kind: str = "mel"
     # Cách kéo dài clip ngắn hơn crop_seconds:
     #   "zero"   → đệm 0 (silence) ở cuối.
     #   "repeat" → lặp (tile) waveform cho đến đủ độ dài → cửa sổ toàn giọng thật,
     #              tránh contaminate pooling/normalize bằng silence.
     pad_mode: str = "repeat"
+    # Target sample rate for waveform output. If None, defaults to mel.sample_rate.
+    # Set to backbone's native rate (e.g. 24000 for Qwen3) so the dataset emits
+    # waveform at the correct rate without backbone-internal resampling.
+    target_sample_rate: Optional[int] = None
 
 
 class SpeakerAudioDataset(Dataset):
@@ -67,8 +71,10 @@ class SpeakerAudioDataset(Dataset):
         self.items = manifest
         self.cfg = cfg
         self.mel_fn = MelSpectrogramFeature(cfg.mel)
-        self.crop_samples = int(cfg.crop_seconds * cfg.mel.sample_rate)
-        self.min_samples = int(cfg.min_seconds * cfg.mel.sample_rate)
+        # Use target_sample_rate if set, otherwise fall back to mel config.
+        self._wav_sr = cfg.target_sample_rate or cfg.mel.sample_rate
+        self.crop_samples = int(cfg.crop_seconds * self._wav_sr)
+        self.min_samples = int(cfg.min_seconds * self._wav_sr)
 
     def __len__(self) -> int:
         return len(self.items)
@@ -95,7 +101,7 @@ class SpeakerAudioDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.items[idx]
-        wav = _load_wav(item["wav_path"], self.cfg.mel.sample_rate)
+        wav = _load_wav(item["wav_path"], self._wav_sr)
         if wav.shape[0] < self.min_samples:
             wav = self._extend(wav, self.min_samples)
         wav = self._crop(wav)

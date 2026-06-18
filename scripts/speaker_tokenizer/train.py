@@ -34,9 +34,18 @@ def main(cfg: DictConfig) -> None:
 
     mel_cfg = MelConfig(**_to_python(cfg.mel))
 
-    # ecapa → mel features; wavlm → raw waveform.
+    # ecapa → mel features; wavlm/redimnet/qwen3 → raw waveform.
     encoder_type = cfg.model.encoder.type
-    input_kind = "waveform" if encoder_type in ("wavlm", "redimnet") else "mel"
+    input_kind = "waveform" if encoder_type in ("wavlm", "redimnet", "qwen3") else "mel"
+
+    # Derive target_sample_rate for waveform backbones.  When the backbone's
+    # native sample rate differs from mel_cfg.sample_rate (16 kHz), the dataset
+    # must resample to the backbone's rate (e.g. 24 kHz for qwen3).
+    target_sample_rate = None
+    if input_kind == "waveform":
+        enc_sr = cfg.model.encoder.get("sample_rate", None)
+        if enc_sr is not None and int(enc_sr) != mel_cfg.sample_rate:
+            target_sample_rate = int(enc_sr)
 
     dm = SpeakerDataModule(
         manifest=cfg.data.manifest,
@@ -50,6 +59,7 @@ def main(cfg: DictConfig) -> None:
         seed=cfg.data.seed,
         input_kind=input_kind,
         pad_mode=cfg.data.get("pad_mode", "repeat"),
+        target_sample_rate=target_sample_rate,
     )
 
     lit = SpeakerTokenizerLit(

@@ -31,6 +31,7 @@ class SpeakerDataModule(pl.LightningDataModule):
         seed: int = 0,
         input_kind: str = "mel",
         pad_mode: str = "repeat",
+        target_sample_rate: Optional[int] = None,
     ):
         super().__init__()
         self.manifest = manifest
@@ -44,6 +45,7 @@ class SpeakerDataModule(pl.LightningDataModule):
         self.seed = seed
         self.input_kind = input_kind
         self.pad_mode = pad_mode
+        self.target_sample_rate = target_sample_rate
 
         self.train_ds: Optional[SpeakerAudioDataset] = None
         self.val_ds: Optional[SpeakerAudioDataset] = None
@@ -67,6 +69,7 @@ class SpeakerDataModule(pl.LightningDataModule):
             deterministic_crop=False,
             input_kind=self.input_kind,
             pad_mode=self.pad_mode,
+            target_sample_rate=self.target_sample_rate,
         )
         val_cfg = SpeakerAudioDatasetConfig(
             mel=self.mel_cfg,
@@ -75,6 +78,7 @@ class SpeakerDataModule(pl.LightningDataModule):
             deterministic_crop=True,
             input_kind=self.input_kind,
             pad_mode=self.pad_mode,
+            target_sample_rate=self.target_sample_rate,
         )
         self.train_ds = SpeakerAudioDataset(train_items, train_cfg)
         self.val_ds = SpeakerAudioDataset(val_items, val_cfg)
