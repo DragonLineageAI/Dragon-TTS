@@ -1,7 +1,7 @@
 """Batch-build LLM-TTS training data (JSONL of ``{"text": <sequence>}``).
 
 For every clip in an LJSpeech-style CSV:
-  1. speaker-tokenize the 16 kHz audio (trained speaker tokenizer) -> 32 ids,
+  1. speaker-tokenize the audio (trained speaker tokenizer) -> 32 ids,
   2. audio-tokenize with the selected codec (SNAC or NeuCodec),
   3. assemble the ``<|task_tts|>...<|end_audio_token|>`` sequence,
   4. append one JSON line ``{"text": "<sequence>"}``.
@@ -27,6 +27,7 @@ from pathlib import Path
 
 import hydra
 import torch
+import torchaudio
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -59,20 +60,6 @@ def _build_codec(cfg: DictConfig, device: str) -> AudioCodec:
         )
 
 
-def _fix_length(wav: torch.Tensor, target: int) -> torch.Tensor:
-    """Center-crop (if longer) or repeat-pad (if shorter) to ``target`` samples.
-
-    Matches the speaker tokenizer's training distribution (fixed-length crop)
-    and lets us batch clips of different lengths together.
-    """
-    n = wav.shape[0]
-    if n == target:
-        return wav
-    if n > target:
-        start = (n - target) // 2
-        return wav[start : start + target]
-    reps = -(-target // max(1, n))  # ceil
-    return wav.repeat(reps)[:target]
 
 
 @hydra.main(
@@ -111,8 +98,8 @@ def main(cfg: DictConfig) -> None:
     )
 
     spk_pipe = SpeakerTokenizerPipeline(str(cfg.speaker_ckpt), device=device)
+    spk_sr = spk_pipe._wav_sample_rate  # e.g. 24000 for Qwen3, 16000 for ECAPA
 
-    speaker_crop = int(cfg.get("speaker_crop_seconds", 4.0) * ds_cfg.speaker_sr)
     skip_empty = cfg.get("skip_empty_text", True)
 
     out_path = Path(cfg.output)
@@ -132,11 +119,18 @@ def main(cfg: DictConfig) -> None:
         done_path, "a" if resume else "w", encoding="utf-8"
     ) as done_f:
         for batch in tqdm(loader, desc="build"):
-            # --- speaker tokens (batched over a fixed-length crop) ---
-            wavs16 = [_fix_length(w, speaker_crop) for w in batch["wav_16k"]]
-            wavs16 = torch.stack(wavs16, dim=0)  # (B, L)
-            spk_idx = spk_pipe.tokenize(wavs16)  # (B, 1, 32)
-            spk_idx = spk_idx[:, 0, :].cpu().tolist()  # B lists of 32 ids
+            # --- speaker tokens (full-length, resampled to backbone SR) ---
+            wavs_resampled = []
+            for w, sr in zip(batch["wav"], batch["sr"]):
+                if sr != spk_sr:
+                    w = torchaudio.functional.resample(w, sr, spk_sr)
+                wavs_resampled.append(w)
+
+            # Process each utterance individually (variable lengths).
+            spk_idx = []
+            for w in wavs_resampled:
+                idx = spk_pipe.tokenize(w.unsqueeze(0))  # (1, 1, 32)
+                spk_idx.append(idx[0, 0, :].cpu().tolist())  # list of 32 ids
 
             # --- audio tokens (batched via codec) ---
             all_audio_tokens = codec.batch_encode(batch["wav_codec"])

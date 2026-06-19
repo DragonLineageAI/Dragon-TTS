@@ -64,8 +64,6 @@ from dragon_tts.llm_tts.vocab import (
 )
 from dragon_tts.speaker_tokenizer.inference.api import SpeakerTokenizerPipeline
 
-SPEAKER_SR = 16000
-
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -95,19 +93,6 @@ def _codes_to_tokens(
     return tokens
 
 
-def _fix_length(wav: torch.Tensor, target: int) -> torch.Tensor:
-    """Center-crop or repeat-pad ``wav`` to exactly ``target`` samples.
-
-    Identical to the helper in ``build_training_data.py``.
-    """
-    n = wav.shape[0]
-    if n == target:
-        return wav
-    if n > target:
-        start = (n - target) // 2
-        return wav[start : start + target]
-    reps = -(-target // max(1, n))  # ceil
-    return wav.repeat(reps)[:target]
 
 
 def _count_lines(path: str) -> int:
@@ -132,7 +117,8 @@ class PrecomputedJsonlDataset(IterableDataset):
     every line is processed exactly once.
 
     Each yielded item is a dict with:
-      - ``wav_16k``: 16 kHz mono waveform for the speaker tokenizer.
+      - ``wav``: mono waveform (at the file's native sample rate).
+      - ``sr``: original sample rate of the audio file.
       - ``text``: transcription string.
       - ``codes``: list of int (pre-computed codec codes).
       - ``audio_name``: identifier string.
@@ -179,14 +165,9 @@ class PrecomputedJsonlDataset(IterableDataset):
             data = data.mean(axis=1)
         wav = torch.from_numpy(data)
 
-        wav_16k = (
-            torchaudio.functional.resample(wav, sr, SPEAKER_SR)
-            if sr != SPEAKER_SR
-            else wav
-        )
-
         return {
-            "wav_16k": wav_16k,
+            "wav": wav,
+            "sr": sr,
             "text": text,
             "codes": codes,
             "audio_name": audio_name,
@@ -263,8 +244,8 @@ def main(cfg: DictConfig) -> None:
 
     # -- speaker tokenizer -----------------------------------------------------
     spk_pipe = SpeakerTokenizerPipeline(str(cfg.speaker_ckpt), device=device)
+    spk_sr = spk_pipe._wav_sample_rate  # e.g. 24000 for Qwen3, 16000 for ECAPA
 
-    speaker_crop = int(cfg.get("speaker_crop_seconds", 4.0) * SPEAKER_SR)
     skip_empty = cfg.get("skip_empty_text", True)
 
     # -- output / resume -------------------------------------------------------
@@ -289,11 +270,18 @@ def main(cfg: DictConfig) -> None:
             if not batch:
                 continue
 
-            # --- speaker tokens (batched over a fixed-length crop) ---
-            wavs16 = [_fix_length(w, speaker_crop) for w in batch["wav_16k"]]
-            wavs16 = torch.stack(wavs16, dim=0)  # (B, L)
-            spk_idx = spk_pipe.tokenize(wavs16)   # (B, 1, 32)
-            spk_idx = spk_idx[:, 0, :].cpu().tolist()  # B lists of 32 ids
+            # --- speaker tokens (full-length, resampled to backbone SR) ---
+            wavs_resampled = []
+            for w, sr in zip(batch["wav"], batch["sr"]):
+                if sr != spk_sr:
+                    w = torchaudio.functional.resample(w, sr, spk_sr)
+                wavs_resampled.append(w)
+
+            # Process each utterance individually (variable lengths).
+            spk_idx = []
+            for w in wavs_resampled:
+                idx = spk_pipe.tokenize(w.unsqueeze(0))  # (1, 1, 32)
+                spk_idx.append(idx[0, 0, :].cpu().tolist())  # list of 32 ids
 
             for i in range(len(batch["audio_name"])):
                 audio_name = batch["audio_name"][i]

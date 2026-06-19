@@ -2,13 +2,9 @@
 
 Reads a metadata CSV (default LJSpeech: ``id|transcription|normalized_transcription``,
 pipe-delimited, no header, wavs under a ``wavs/`` dir) and yields, per clip, the
-audio resampled to *both* sample rates needed downstream:
-
-  - ``codec_sr`` for audio tokenization (24 kHz for SNAC, 16 kHz for NeuCodec),
-  - 16 kHz for the speaker tokenizer.
-
-Audio is loaded once at native sample rate and resampled twice (no cropping —
-the codec needs the full clip).
+audio resampled to the codec sample rate plus the raw waveform at its native
+sample rate (for the speaker tokenizer, which resamples to its own backbone SR
+at runtime).
 """
 
 from __future__ import annotations
@@ -23,7 +19,6 @@ import torch
 import torchaudio
 from torch.utils.data import Dataset
 
-SPEAKER_SR = 16000
 SNAC_SR = 24000
 NEUCODEC_SR = 16000
 
@@ -41,7 +36,6 @@ class CsvDatasetConfig:
     text_col: int = 2
     text_fallback_col: Optional[int] = 1
     speaker_col: Optional[int] = None
-    speaker_sr: int = SPEAKER_SR
     snac_sr: int = SNAC_SR
     # Codec sample rate — set to NEUCODEC_SR (16000) when using NeuCodec.
     codec_sr: Optional[int] = None  # None → use snac_sr for backward compat
@@ -77,7 +71,7 @@ def _resolve_text(cfg: CsvDatasetConfig, row: List[str]) -> str:
 
 
 class LJSpeechCsvDataset(Dataset):
-    """Each item: ``{wav_codec, wav_16k, text, speaker_id, wav_path}``."""
+    """Each item: ``{wav_codec, wav, sr, text, speaker_id, wav_path}``."""
 
     def __init__(self, cfg: CsvDatasetConfig):
         self.cfg = cfg
@@ -109,18 +103,10 @@ class LJSpeechCsvDataset(Dataset):
             if sr != self._codec_sr
             else wav
         )
-        wav_16k = (
-            wav_codec
-            if self._codec_sr == cfg.speaker_sr
-            else (
-                torchaudio.functional.resample(wav, sr, cfg.speaker_sr)
-                if sr != cfg.speaker_sr
-                else wav
-            )
-        )
         return {
             "wav_codec": wav_codec,
-            "wav_16k": wav_16k,
+            "wav": wav,
+            "sr": sr,
             "text": text,
             "speaker_id": speaker_id,
             "wav_path": wav_path,
